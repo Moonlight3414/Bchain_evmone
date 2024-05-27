@@ -32,10 +32,7 @@ public:
     static constexpr auto limit = 1024;
 
     /// Returns the pointer to the "bottom", i.e. below the stack space.
-    [[nodiscard, clang::no_sanitize("bounds")]] uint256* bottom() noexcept
-    {
-        return m_stack_space - 1;
-    }
+    [[nodiscard]] uint256* bottom() noexcept { return m_stack_space; }
 
 private:
     /// The storage allocated for maximum possible number of items.
