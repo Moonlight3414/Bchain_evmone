@@ -20,6 +20,7 @@ struct EXMMAXModStateInterface
         size_t x_stride, size_t y_idx, size_t y_stride, size_t count) noexcept = 0;
     [[nodiscard]] virtual bool mulmodx(size_t dst_idx, size_t dst_stride, size_t x_idx,
         size_t x_stride, size_t y_idx, size_t y_stride, size_t count) noexcept = 0;
+    virtual void print(std::ostream& out) noexcept = 0;
 
     [[nodiscard]] virtual size_t value_size_multiplier() const noexcept = 0;
     [[nodiscard]] virtual size_t num_values() const noexcept = 0;
@@ -146,6 +147,17 @@ struct EXMMAXModState : public EXMMAXModStateInterface
     {
         return operation([&](const UintT& x, const UintT& y) { return arith.mul(x, y); }, dst_idx,
             dst_stride, x_idx, x_stride, y_idx, y_stride, count);
+    }
+
+    void print(std::ostream& out) noexcept override
+    {
+        out << "{ \n";
+        for (size_t i = 0; i < values.size(); ++i)
+        {
+            if (values[i] != 0)
+                out << "\t" << i << ": " << hex(arith.from_mont(values[i])) << ", \n";
+        }
+        out << "}\n";
     }
 
     [[nodiscard]] size_t num_values() const noexcept override { return values.size(); }
@@ -307,6 +319,14 @@ struct EXMMAXModState : public EXMMAXModStateInterface
         return 0;
 
     return active_mod->value_size_multiplier();
+}
+
+void EVMMAXState::print_state(std::ostream& out) const noexcept
+{
+    if (!is_activated())
+        return;
+
+    active_mod->print(out);
 }
 
 void EVMMAXState::clear() noexcept
