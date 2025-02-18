@@ -6,6 +6,7 @@
 #include "../utils/utils.hpp"
 #include "evmone/delegation.hpp"
 #include "statetest.hpp"
+#include "test/state/precompiles.hpp"
 
 #include <evmone/eof.hpp>
 #include <nlohmann/json.hpp>
@@ -498,6 +499,9 @@ void validate_state(const TestState& state, evmc_revision rev)
 {
     for (const auto& [addr, acc] : state)
     {
+        if (state::is_precompile(rev, addr) && !acc.code.empty())
+            throw std::invalid_argument("unexpected code at precompile address " + hex0x(addr));
+
         const bool allowedEF = (rev >= EVMC_PRAGUE && is_code_delegated(acc.code)) ||
                                (rev >= EVMC_OSAKA && is_eof_container(acc.code)) ||
                                // exceptions to EIP-3541 rule existing on Mainnet
