@@ -11,6 +11,40 @@ namespace
 constexpr ModArith Fp{FieldPrime};
 constexpr auto B = Fp.to_mont(3);
 constexpr auto B3 = Fp.to_mont(3 * 3);
+
+uint256 inv_via_gcd(const ModArith<uint256>& m, const uint256& y) noexcept
+{
+    const auto INV2 =
+        m.to_mont(0x183227397098d014dc2822db40c0ac2ecbc0b548b438e5469e10460b6c3e7ea4_u256);
+
+    auto a = y;
+    auto u = m.to_mont(1);
+    auto b = m.mod;
+    uint256 v = 0;
+
+    while (a != 0)
+    {
+        if ((a & 1) == 0)
+        {
+            a = a >> 1;
+            u = m.mul(u, INV2);
+        }
+        else
+        {
+            if (a < b)
+            {
+                std::swap(a, b);
+                std::swap(u, v);
+            }
+            a = (a - b) >> 1;
+            u = m.mul(m.sub(u, v), INV2);
+        }
+    }
+
+    assert(b == m.to_mont(1));
+    return v;
+}
+
 }  // namespace
 
 bool validate(const Point& pt) noexcept
@@ -37,7 +71,7 @@ Point add(const Point& pt1, const Point& pt2) noexcept
     // b3 == 9 for y^2 == x^3 + 3
     const auto r = ecc::add(Fp, ecc::to_proj(Fp, pt1), ecc::to_proj(Fp, pt2), B3);
 
-    return ecc::to_affine(Fp, field_inv, r);
+    return ecc::to_affine(Fp, inv_via_gcd, r);
 }
 
 Point mul(const Point& pt, const uint256& c) noexcept
