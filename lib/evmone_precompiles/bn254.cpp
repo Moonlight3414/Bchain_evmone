@@ -22,17 +22,17 @@ uint256 inv_via_gcd(const ModArith<uint256>& m, const uint256& y) noexcept
     auto b = m.mod;
     auto v = 0_u256;
 
-    const auto div_by_2 = [](const uint256& u) {
-        const auto u_odd = (u & 1) != 0;
-        auto r = u >> 1;
-        if (u_odd)
+    const auto div_by_2 = [](const uint256& z) {
+        const auto odd = (z[0] & 1) != 0;
+        auto r = z >> 1;
+        if (odd)
             r = r + INV2;
         return r;
     };
 
     while (a != 0)
     {
-        if ((a & 1) == 0)
+        if ((a[0] & 1) == 0)
         {
             a = a >> 1;
             u = div_by_2(u);
