@@ -14,19 +14,28 @@ constexpr auto B3 = Fp.to_mont(3 * 3);
 
 uint256 inv_via_gcd(const ModArith<uint256>& m, const uint256& y) noexcept
 {
-    const auto INV2 = 0x183227397098d014dc2822db40c0ac2ecbc0b548b438e5469e10460b6c3e7ea4_u256;
+    static constexpr auto INV2 =
+        0x183227397098d014dc2822db40c0ac2ecbc0b548b438e5469e10460b6c3e7ea4_u256;
 
     auto a = m.from_mont(y);
     auto u = 1_u256;
     auto b = m.mod;
     auto v = 0_u256;
 
+    const auto div_by_2 = [](const uint256& u) {
+        const auto u_odd = (u & 1) != 0;
+        auto r = u >> 1;
+        if (u_odd)
+            r = r + INV2;
+        return r;
+    };
+
     while (a != 0)
     {
         if ((a & 1) == 0)
         {
             a = a >> 1;
-            u = mulmod(u, INV2, m.mod);
+            u = div_by_2(u);
         }
         else
         {
@@ -36,7 +45,7 @@ uint256 inv_via_gcd(const ModArith<uint256>& m, const uint256& y) noexcept
                 std::swap(u, v);
             }
             a = (a - b) >> 1;
-            u = mulmod(m.sub(u, v), INV2, m.mod);
+            u = div_by_2(m.sub(u, v));
         }
     }
 
@@ -83,7 +92,7 @@ Point mul(const Point& pt, const uint256& c) noexcept
 
     const auto pr = ecc::mul(Fp, ecc::to_proj(Fp, pt), c, B3);
 
-    return ecc::to_affine(Fp, field_inv, pr);
+    return ecc::to_affine(Fp, inv_via_gcd, pr);
 }
 
 uint256 field_inv(const ModArith<uint256>& m, const uint256& x) noexcept
