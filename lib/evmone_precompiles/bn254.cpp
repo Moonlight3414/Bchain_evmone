@@ -32,12 +32,7 @@ uint256 inv_via_gcd(const ModArith<uint256>& m, const uint256& y) noexcept
 
     while (a != 0)
     {
-        if ((a[0] & 1) == 0)
-        {
-            a = a >> 1;
-            u = div_by_2(u);
-        }
-        else
+        if ((a[0] & 1) != 0)
         {
             const auto d = subc(a, b);
             if (d.carry)
@@ -50,9 +45,10 @@ uint256 inv_via_gcd(const ModArith<uint256>& m, const uint256& y) noexcept
             {
                 a = d.value;
             }
-            a = a >> 1;
-            u = div_by_2(m.sub(u, v));
+            u = m.sub(u, v);
         }
+        a = a >> 1;
+        u = div_by_2(u);
     }
 
     // FIXME: assert(b == 1);
