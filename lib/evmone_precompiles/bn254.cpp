@@ -39,12 +39,18 @@ uint256 inv_via_gcd(const ModArith<uint256>& m, const uint256& y) noexcept
         }
         else
         {
-            if (a < b)
+            const auto d = subc(a, b);
+            if (d.carry)
             {
                 std::swap(a, b);
                 std::swap(u, v);
+                a = a - b;
             }
-            a = (a - b) >> 1;
+            else
+            {
+                a = d.value;
+            }
+            a = a >> 1;
             u = div_by_2(m.sub(u, v));
         }
     }
