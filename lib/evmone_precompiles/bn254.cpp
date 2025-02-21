@@ -15,10 +15,13 @@ constexpr auto B3 = Fp.to_mont(3 * 3);
 uint256 inv_via_gcd(const ModArith<uint256>& m, const uint256& y) noexcept
 {
     // static constexpr auto INV2 =
-        // 0x183227397098d014dc2822db40c0ac2ecbc0b548b438e5469e10460b6c3e7ea4_u256;
+    // 0x183227397098d014dc2822db40c0ac2ecbc0b548b438e5469e10460b6c3e7ea4_u256;
 
-    auto a = m.from_mont(y);
-    auto u = 1_u256;
+    static constexpr auto R2_MOD_P =
+        3096616502983703923843567936837374451735540968419076528771170197431451843209_u256;
+
+    auto a = y;
+    auto u = R2_MOD_P;
     auto b = m.mod;
     auto v = 0_u256;
 
@@ -57,7 +60,7 @@ uint256 inv_via_gcd(const ModArith<uint256>& m, const uint256& y) noexcept
     }
 
     // FIXME: assert(b == 1);
-    return m.to_mont(v);
+    return v;
 }
 
 }  // namespace
