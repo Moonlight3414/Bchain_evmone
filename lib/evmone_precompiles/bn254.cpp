@@ -78,15 +78,15 @@ bool validate(const Point& pt) noexcept
     return y2 == x3_3;
 }
 
-Point add(const Point& pt1, const Point& pt2) noexcept
+Point add(const Point& p, const Point& q) noexcept
 {
-    if (pt1.is_inf())
-        return pt2;
-    if (pt2.is_inf())
-        return pt1;
+    if (p.is_inf())
+        return q;
+    if (q.is_inf())
+        return p;
 
     // b3 == 9 for y^2 == x^3 + 3
-    const auto r = ecc::add(Fp, ecc::to_proj(Fp, pt1), ecc::to_proj(Fp, pt2), B3);
+    const auto r = ecc::add(Fp, ecc::to_proj(Fp, p), ecc::to_proj(Fp, q), B3);
 
     return ecc::to_affine(Fp, inv_via_gcd, r);
 }
