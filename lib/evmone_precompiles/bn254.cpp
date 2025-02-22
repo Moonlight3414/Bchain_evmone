@@ -85,10 +85,31 @@ Point add(const Point& p, const Point& q) noexcept
     if (q.is_inf())
         return p;
 
-    // b3 == 9 for y^2 == x^3 + 3
-    const auto r = ecc::add(Fp, ecc::to_proj(Fp, p), ecc::to_proj(Fp, q), B3);
+    const auto x1 = Fp.to_mont(p.x);
+    const auto y1 = Fp.to_mont(p.y);
+    const auto x2 = Fp.to_mont(q.x);
+    const auto y2 = Fp.to_mont(q.y);
 
-    return ecc::to_affine(Fp, inv_via_gcd, r);
+    const auto dx = Fp.sub(x2, x1);
+    const auto dy = Fp.sub(y2, y1);
+
+    const auto dx1 = inv_via_gcd(Fp, dx);
+    auto slope = Fp.mul(dy, dx1);
+    if (dx == 0)
+    {
+        if (dy != 0)
+            return {0, 0};
+
+        const auto xx = Fp.mul(x1, x1);
+        const auto xx3 = Fp.add(Fp.add(xx, xx), xx);
+        const auto yy = Fp.add(y1, y1);
+
+        slope = Fp.mul(xx3, inv_via_gcd(Fp, yy));
+    }
+
+    const auto xr = Fp.sub(Fp.sub(Fp.mul(slope, slope), x1), x2);
+    const auto yr = Fp.sub(Fp.mul(Fp.sub(x1, xr), slope), y1);
+    return {Fp.from_mont(xr), Fp.from_mont(yr)};
 }
 
 Point mul(const Point& pt, const uint256& c) noexcept
