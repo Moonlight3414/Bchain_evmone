@@ -41,11 +41,10 @@ uint256 inv_via_gcd(const ModArith<uint256>& m, const uint256& y) noexcept
             const auto d = subc(a, b);
             if (d.carry)
             {
-                auto t = a;
-                a = b - a;
-                b = t;
+                b = a;
+                a = -d.value;
 
-                t = u;
+                auto t = u;
                 u = v;
                 v = t;
             }
