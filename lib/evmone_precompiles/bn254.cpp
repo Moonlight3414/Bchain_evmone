@@ -59,7 +59,7 @@ uint256 inv_via_gcd(const ModArith<uint256>& m, const uint256& y) noexcept
         u = div_by_2(u);
     }
 
-    // FIXME: assert(b == 1);
+    assert(b == 1 || y == 0);
     return v;
 }
 
