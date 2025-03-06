@@ -215,6 +215,7 @@ public:
         output_size = 0;
         deploy_container = {};
         m_tx = {};
+        m_initcodes.reset();
         call_stack = {};
     }
 
