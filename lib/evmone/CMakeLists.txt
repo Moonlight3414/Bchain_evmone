@@ -4,9 +4,6 @@
 
 include(LibraryTools)
 
-hunter_add_package(intx)
-find_package(intx CONFIG REQUIRED)
-
 add_library(evmone
     ${include_dir}/evmone/evmone.h
     advanced_analysis.cpp
@@ -14,32 +11,44 @@ add_library(evmone
     advanced_execution.cpp
     advanced_execution.hpp
     advanced_instructions.cpp
-    baseline.cpp
     baseline.hpp
+    baseline_analysis.cpp
+    baseline_execution.cpp
     baseline_instruction_table.cpp
     baseline_instruction_table.hpp
+    constants.hpp
+    delegation.cpp
+    delegation.hpp
     eof.cpp
-    eof.hpp    
+    eof.hpp
     instructions.hpp
     instructions_calls.cpp
+    instructions_opcodes.hpp
     instructions_storage.cpp
     instructions_traits.hpp
     instructions_xmacro.hpp
-    opcodes_helpers.h
     tracing.cpp
     tracing.hpp
     vm.cpp
     vm.hpp
 )
-target_link_libraries(evmone PUBLIC evmc::evmc intx::intx PRIVATE evmc::instructions ethash::keccak)
+target_compile_features(evmone PUBLIC cxx_std_20)
+target_link_libraries(evmone PUBLIC evmc::evmc intx::intx evmmax PRIVATE ethash::keccak)
 target_include_directories(evmone PUBLIC
     $<BUILD_INTERFACE:${include_dir}>$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
+
+if(EVMONE_X86_64_ARCH_LEVEL GREATER_EQUAL 2)
+    # Add CPU architecture runtime check. The EVMONE_X86_64_ARCH_LEVEL has a valid value.
+    target_sources(evmone PRIVATE cpu_check.cpp)
+    set_source_files_properties(cpu_check.cpp PROPERTIES COMPILE_DEFINITIONS EVMONE_X86_64_ARCH_LEVEL=${EVMONE_X86_64_ARCH_LEVEL})
+endif()
+
 if(CABLE_COMPILER_GNULIKE)
     target_compile_options(
         evmone PRIVATE
         -fno-exceptions
-        $<$<CXX_COMPILER_ID:GNU>:-Wstack-usage=2500>
+        $<$<CXX_COMPILER_ID:GNU>:-Wstack-usage=2950>
     )
     if(NOT SANITIZE MATCHES undefined)
         # RTTI can be disabled except for UBSan which checks vptr integrity.

@@ -6,9 +6,10 @@
 /// about accounts, without storage.
 
 #include "evm_fixture.hpp"
+#include <evmone/instructions_traits.hpp>
 
 using namespace evmc::literals;
-using evmone::test::evm;
+using namespace evmone::test;
 
 TEST_P(evm, code)
 {
@@ -148,7 +149,7 @@ TEST_P(evm, log)
 {
     for (auto op : {OP_LOG0, OP_LOG1, OP_LOG2, OP_LOG3, OP_LOG4})
     {
-        const auto n = op - OP_LOG0;
+        const uint8_t n = op - OP_LOG0;
         const auto code =
             push(1) + push(2) + push(3) + push(4) + mstore8(2, 0x77) + push(2) + push(2) + op;
         host.recorded_logs.clear();
@@ -160,7 +161,7 @@ TEST_P(evm, log)
         EXPECT_EQ(last_log.data[0], 0x77);
         EXPECT_EQ(last_log.data[1], 0);
         ASSERT_EQ(last_log.topics.size(), n);
-        for (size_t i = 0; i < static_cast<size_t>(n); ++i)
+        for (size_t i = 0; i < n; ++i)
         {
             EXPECT_EQ(last_log.topics[i].bytes[31], 4 - i);
         }
@@ -193,7 +194,7 @@ TEST_P(evm, log_data_cost)
         EXPECT_EQ(host.recorded_logs.size(), 0);
         execute(cost - 1, code);
         EXPECT_EQ(result.status_code, EVMC_OUT_OF_GAS);
-        EXPECT_EQ(host.recorded_logs.size(), 0) << to_name(op);
+        EXPECT_EQ(host.recorded_logs.size(), 0) << evmone::instr::traits[op].name;
         host.recorded_logs.clear();
     }
 }
@@ -431,7 +432,7 @@ TEST_P(evm, blockhash)
     host.block_hash.bytes[13] = 0x13;
 
     host.tx_context.block_number = 0;
-    const auto code = push(0) + OP_BLOCKHASH + ret_top();
+    const auto code = blockhash(0) + ret_top();
     execute(code);
     EXPECT_EQ(result.status_code, EVMC_SUCCESS);
     EXPECT_EQ(gas_used, 38);
@@ -495,9 +496,10 @@ TEST_P(evm, extcodecopy_big_index)
 
 TEST_P(evm, extcodehash)
 {
-    auto& hash = host.accounts[{}].codehash;
-    std::fill(std::begin(hash.bytes), std::end(hash.bytes), uint8_t{0xee});
+    static constexpr auto HASH =
+        0xe10000a00000000b0000000000c00000000d00000e0000f0000000000000001e_bytes32;
 
+    host.accounts[{}].codehash = HASH;
     const auto code = push(0) + OP_EXTCODEHASH + ret_top();
 
     rev = EVMC_BYZANTIUM;
@@ -508,9 +510,7 @@ TEST_P(evm, extcodehash)
     execute(code);
     EXPECT_EQ(gas_used, 418);
     ASSERT_EQ(result.output_size, 32);
-    auto expected_hash = bytes(32, 0xee);
-    EXPECT_EQ(bytes_view(result.output_data, result.output_size),
-        bytes_view(std::begin(hash.bytes), std::size(hash.bytes)));
+    EXPECT_EQ(bytes_view(result.output_data, result.output_size), HASH);
 }
 
 TEST_P(evm, codecopy_empty)
@@ -584,8 +584,8 @@ TEST_P(evm, extcodecopy_fill_tail)
 
 TEST_P(evm, extcodecopy_buffer_overflow)
 {
-    const auto code = bytecode{} + OP_NUMBER + OP_TIMESTAMP + OP_CALLDATASIZE + OP_ADDRESS +
-                      OP_EXTCODECOPY + ret(OP_CALLDATASIZE, OP_NUMBER);
+    const auto code = bytecode{} + OP_NUMBER + OP_TIMESTAMP + calldatasize() + OP_ADDRESS +
+                      OP_EXTCODECOPY + ret(calldatasize(), OP_NUMBER);
 
     host.accounts[msg.recipient].code = code;
 

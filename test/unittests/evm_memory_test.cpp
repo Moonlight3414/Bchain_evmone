@@ -4,13 +4,12 @@
 
 #include "evm_fixture.hpp"
 #include <evmone/instructions_traits.hpp>
-#include <intx/intx.hpp>
 #include <algorithm>
 
 using namespace evmone;
 using namespace evmc::literals;
 using namespace intx;
-using evmone::test::evm;
+using namespace evmone::test;
 
 TEST_P(evm, memory_and_not)
 {
@@ -100,29 +99,30 @@ TEST_P(evm, keccak256_memory_cost)
 
 TEST_P(evm, calldatacopy_memory_cost)
 {
-    auto code = push(1) + push(0) + push(0) + OP_CALLDATACOPY;
+    const auto code = calldatacopy(0, 0, 1);
     execute(18, code);
-    EXPECT_EQ(result.status_code, EVMC_SUCCESS);
-    execute(17, code);
-    EXPECT_EQ(result.status_code, EVMC_OUT_OF_GAS);
+    EXPECT_GAS_USED(EVMC_SUCCESS, 18);
 }
 
 
 struct memory_access_opcode
 {
-    evmc_opcode opcode;
+    Opcode opcode;
     int memory_index_arg;
     int memory_size_arg;
 };
 
 
-memory_access_opcode memory_access_opcodes[] = {
+static constexpr memory_access_opcode memory_access_opcodes[] = {
     {OP_KECCAK256, 0, 1},
     {OP_CALLDATACOPY, 0, 2},
     {OP_CODECOPY, 0, 2},
     {OP_MLOAD, 0, -1},
     {OP_MSTORE, 0, -1},
     {OP_MSTORE8, 0, -1},
+    {OP_MCOPY, 0, 2},
+    {OP_MCOPY, 1, 2},
+    {OP_DATACOPY, 0, 2},
     {OP_EXTCODECOPY, 1, 3},
     {OP_RETURNDATACOPY, 0, 2},
     {OP_LOG0, 0, 1},
@@ -148,7 +148,7 @@ struct
 {
     uint256 index;
     uint256 size;
-} memory_access_test_cases[] = {
+} static constexpr memory_access_test_cases[] = {
     {0, 0x100000000},
     {0, 0x10000000000000000_u256},
     {0, 0x100000000000000000000000000000000_u256},
@@ -176,9 +176,9 @@ struct
 
 TEST_P(evm, memory_access)
 {
+    rev = EVMC_OSAKA;
     // This test checks if instructions accessing memory properly respond with out-of-gas
     // error for combinations of memory offset and memory size arguments.
-    rev = EVMC_CONSTANTINOPLE;
 
     for (const auto& p : memory_access_test_cases)
     {
@@ -207,6 +207,15 @@ TEST_P(evm, memory_access)
                 code += push(0);
 
             code += bytecode{t.opcode};
+
+            if (t.opcode == OP_DATACOPY)
+            {
+                if (is_advanced())
+                    continue;
+
+                code += bytecode{OP_STOP};
+                code = eof_bytecode(code, 3).data(bytes(32, 0));
+            }
 
             const auto gas = 8796294610952;
             execute(gas, code);
@@ -239,4 +248,66 @@ TEST_P(evm, memory_access)
             }
         }
     }
+}
+
+TEST_P(evm, mcopy)
+{
+    rev = EVMC_CANCUN;
+    bytecode s;
+    s += mstore(0, push(0x0123456789abcdef000000000000000000000000000000000000000000000000_u256)) +
+         mcopy(32, 0, 8) + ret(32, 8);
+    execute(s);
+    EXPECT_EQ(result.status_code, EVMC_SUCCESS);
+    ASSERT_EQ(result.output_size, 8);
+    EXPECT_EQ(bytes_view(&result.output_data[0], 8), "0123456789abcdef"_hex);
+
+    // copy from uninitialized memory
+    s = mcopy(0, 24, 16) + ret(0, 16);
+    execute(s);
+    EXPECT_EQ(result.status_code, EVMC_SUCCESS);
+    ASSERT_EQ(result.output_size, 16);
+    EXPECT_EQ(bytes_view(&result.output_data[0], 16), "00000000000000000000000000000000"_hex);
+
+    // copy from initialized + uninitialized memory
+    s = mstore(0, push(0x0000000000000000000000000000000000000000000000000123456789abcdef_u256)) +
+        mcopy(64, 24, 16) + ret(64, 16);
+    execute(s);
+    EXPECT_EQ(result.status_code, EVMC_SUCCESS);
+    ASSERT_EQ(result.output_size, 16);
+    EXPECT_EQ(bytes_view(&result.output_data[0], 16), "0123456789abcdef0000000000000000"_hex);
+
+    // overlapping src < dst
+    s = mstore(0, push(0x0123456789abcdef000000000000000000000000000000000000000000000000_u256)) +
+        mcopy(4, 0, 8) + ret(0, 16);
+    execute(s);
+    EXPECT_EQ(result.status_code, EVMC_SUCCESS);
+    ASSERT_EQ(result.output_size, 16);
+    EXPECT_EQ(bytes_view(&result.output_data[0], 16), "012345670123456789abcdef00000000"_hex);
+
+    // overlapping src > dst
+    s = mstore(0, push(0x00112233445566778899aabbccddeeff00000000000000000000000000000000_u256)) +
+        mcopy(0, 4, 8) + ret(0, 16);
+    execute(s);
+    EXPECT_EQ(result.status_code, EVMC_SUCCESS);
+    ASSERT_EQ(result.output_size, 16);
+    EXPECT_EQ(bytes_view(&result.output_data[0], 16), "445566778899aabb8899aabbccddeeff"_hex);
+
+    // overlapping src == dst
+    s = mstore(0, push(0x00112233445566778899aabbccddeeff00000000000000000000000000000000_u256)) +
+        mcopy(4, 4, 8) + ret(0, 16);
+    execute(s);
+    EXPECT_EQ(result.status_code, EVMC_SUCCESS);
+    ASSERT_EQ(result.output_size, 16);
+    EXPECT_EQ(bytes_view(&result.output_data[0], 16), "00112233445566778899aabbccddeeff"_hex);
+}
+
+TEST_P(evm, mcopy_memory_cost)
+{
+    rev = EVMC_CANCUN;
+    const auto code = mcopy(0, 0, 1);
+    execute(18, code);
+    EXPECT_GAS_USED(EVMC_SUCCESS, 18);
+
+    execute(17, code);
+    EXPECT_EQ(result.status_code, EVMC_OUT_OF_GAS);
 }

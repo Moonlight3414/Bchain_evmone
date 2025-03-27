@@ -4,17 +4,21 @@
 
 #include <gtest/gtest.h>
 #include <test/state/mpt.hpp>
+#include <test/state/mpt_hash.hpp>
 #include <test/state/rlp.hpp>
 #include <test/utils/utils.hpp>
 #include <numeric>
+#include <random>
+#include <ranges>
 
+using namespace intx::literals;
 using namespace evmone;
 using namespace evmone::state;
-using namespace intx;
+using namespace evmone::test;
 
 TEST(state_mpt, empty_trie)
 {
-    EXPECT_EQ(MPT{}.hash(), emptyMPTHash);
+    EXPECT_EQ(MPT{}.hash(), EMPTY_MPT_HASH);
 }
 
 TEST(state_mpt, single_account_v1)
@@ -26,7 +30,7 @@ TEST(state_mpt, single_account_v1)
     constexpr auto addr = 0x0000000000000000000000000000000000000002_address;
     constexpr uint64_t nonce = 0;
     constexpr auto balance = 1_u256;
-    constexpr auto storage_hash = emptyMPTHash;
+    constexpr auto storage_hash = EMPTY_MPT_HASH;
     constexpr auto code_hash =
         0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470_bytes32;
 
@@ -85,10 +89,33 @@ TEST(state_mpt, branch_node_example1)
     EXPECT_EQ(hex(trie.hash()), "1aaa6f712413b9a115730852323deb5f5d796c29151a60a1f55f41a25354cd26");
 }
 
+TEST(state_mpt, branch_node_of_3)
+{
+    // A trie of single branch node and three leaf nodes with paths of length 2.
+    // The branch node has leaf nodes at positions [0], [1] and [2]. All leaves have path 0.
+    // {0:0 1:0 2:0}
+
+    MPT trie;
+    trie.insert("00"_hex, "X"_b);
+    trie.insert("10"_hex, "Y"_b);
+    trie.insert("20"_hex, "Z"_b);
+    EXPECT_EQ(hex(trie.hash()), "5c5154e8d108dcf8b9946c8d33730ec8178345ce9d36e6feed44f0134515482d");
+}
+
+TEST(state_mpt, leaf_node_with_empty_path)
+{
+    // Both inserted leaves have empty path in the end.
+    // 0:{0:"X", 1:"Y"}
+    MPT trie;
+    trie.insert("00"_hex, "X"_b);
+    trie.insert("01"_hex, "Y"_b);
+    EXPECT_EQ(hex(trie.hash()), "0a923005d10fbd4e571655cec425db7c5091db03c33891224073a55d3abc2415");
+}
+
 TEST(state_mpt, extension_node_example1)
 {
     // A trie of an extension node followed by a branch node with
-    // two leafs with single nibble paths.
+    // two leaves with single nibble paths.
     // 5858:{4:1, 5:a}
 
     auto value1 = "v___________________________1"_b;
@@ -118,7 +145,7 @@ TEST(state_mpt, extension_node_example1)
 TEST(state_mpt, extension_node_example2)
 {
     // A trie of an extension node followed by a branch node with
-    // two leafs with longer paths.
+    // two leaves with longer paths.
     // 585:{8:41, 9:5a}
 
     auto value1 = "v___________________________1"_b;
@@ -155,6 +182,69 @@ TEST(state_mpt, extension_node_example2)
     EXPECT_EQ(hex(trie.hash()), "ac28c08fa3ff1d0d2cc9a6423abb7af3f4dcc37aa2210727e7d3009a9b4a34e8");
 }
 
+TEST(state_mpt, keys_length_desc)
+{
+    const auto k127 = rlp::encode(127);
+    const auto k128 = rlp::encode(128);
+    EXPECT_EQ(k127, "7f"_hex);
+    EXPECT_EQ(k128, "8180"_hex);
+
+    MPT asc;
+    asc.insert(k127, {});
+    asc.insert(k128, {});
+    EXPECT_EQ(hex(asc.hash()), "2fb7f2dee94138d79248ea2545a3ba1ceecb39e2037ed4e1d571c4d8bfbfa535");
+
+    MPT desc;
+    desc.insert(k128, {});
+    desc.insert(k127, {});
+    EXPECT_EQ(hex(desc.hash()), "2fb7f2dee94138d79248ea2545a3ba1ceecb39e2037ed4e1d571c4d8bfbfa535");
+}
+
+// In Ethereum lists are merkalized by creating a trie with keys of RLP-encoded enumeration.
+// Therefore, the keys are of different length but none of them is a prefix of another.
+// These tests create a list of N elements with empty values.
+// TODO: Check with go-ethereum implementation.
+static constexpr uint64_t LONG_LIST_SIZE = 100'000;
+static constexpr auto LONG_LIST_HASH =
+    0x70760bc8a0ebcc93601519d778576ae67a81731112df8d8c1518437a52f13520_bytes32;
+
+TEST(state_mpt, long_list_asc)
+{
+    uint64_t keys[LONG_LIST_SIZE];
+    std::iota(std::begin(keys), std::end(keys), uint64_t{0});
+
+    MPT trie;
+    for (const auto key : keys)
+        trie.insert(rlp::encode(key), {});
+    EXPECT_EQ(trie.hash(), LONG_LIST_HASH);
+}
+
+TEST(state_mpt, long_list_desc)
+{
+    uint64_t keys[LONG_LIST_SIZE];
+    std::iota(std::begin(keys), std::end(keys), uint64_t{0});
+    std::ranges::reverse(keys);
+
+    MPT trie;
+    for (const auto key : keys)
+        trie.insert(rlp::encode(key), {});
+    EXPECT_EQ(trie.hash(), LONG_LIST_HASH);
+}
+
+TEST(state_mpt, long_list_random)
+{
+    std::random_device rd;
+    std::mt19937_64 gen{rd()};
+    uint64_t keys[LONG_LIST_SIZE];
+    std::iota(std::begin(keys), std::end(keys), uint64_t{0});
+    std::ranges::shuffle(keys, gen);
+
+    MPT trie;
+    for (const auto key : keys)
+        trie.insert(rlp::encode(key), {});
+    EXPECT_EQ(trie.hash(), LONG_LIST_HASH);
+}
+
 TEST(state_mpt, trie_topologies)
 {
     struct KVH
@@ -164,8 +254,11 @@ TEST(state_mpt, trie_topologies)
         const char* hash_hex;
     };
 
+    // The test cases are cross-checked with go-ethereum implementation.
+    // https://github.com/ethereum/go-ethereum/blob/7dea9c10cdb42e8c9f71b8b324cbe9222ab105cf/trie/stacktrie_test.go#L35
+
     // clang-format off
-    std::vector<KVH> tests[] = {
+    const std::vector<KVH> tests[] = {
         { // {0:0, 7:0, f:0}
             {"00", "v_______________________0___0", "5cb26357b95bb9af08475be00243ceb68ade0b66b5cd816b0c18a18c612d2d21"},
             {"70", "v_______________________0___1", "8ff64309574f7a437a7ad1628e690eb7663cfde10676f8a904a8c8291dbc1603"},
@@ -303,6 +396,38 @@ TEST(state_mpt, trie_topologies)
             {"123e", "x___________________________2", "0d230561e398c579e09a9f7b69ceaf7d3970f5a436fdb28b68b7a37c5bdd6b80"},
             {"13aa", "x___________________________3", "ff0dc70ce2e5db90ee42a4c2ad12139596b890e90eb4e16526ab38fa465b35cf"},
         },
+        { // branch node with short values
+            {"01", "a", "b48605025f5f4b129d40a420e721aa7d504487f015fce85b96e52126365ef7dc"},
+            {"80", "b", "2dc6b680daf74db067cb7aeaad73265ded93d96fce190fcbf64f498d475672ab"},
+            {"ee", "c", "017dc705a54ac5328dd263fa1bae68d655310fb3e3f7b7bc57e9a43ddf99c4bf"},
+            {"ff", "d", "bd5a3584d271d459bd4eb95247b2fc88656b3671b60c1125ffe7bc0b689470d0"},
+        },
+        { // ext node with short branch node, then becoming long
+            {"a0", "a", "a83e028cb1e4365935661a9fd36a5c65c30b9ab416eaa877424146ca2a69d088"},
+            {"a1", "b", "f586a4639b07b01798ca65e05c253b75d51135ebfbf6f8d6e87c0435089e65f0"},
+            {"a2", "c", "63e297c295c008e09a8d531e18d57f270b6bc403e23179b915429db948cd62e3"},
+            {"a3", "d", "94a7b721535578e9381f1f4e4b6ec29f8bdc5f0458a30320684c562f5d47b4b5"},
+            {"a4", "e", "4b7e66d1c81965cdbe8fab8295ef56bc57fefdc5733d4782d2f8baf630f083c6"},
+            {"a5", "f", "2997e7b502198ce1783b5277faacf52b25844fb55a99b63e88bdbbafac573106"},
+            {"a6", "g", "bee629dd27a40772b2e1a67ec6db270d26acdf8d3b674dfae27866ad6ae1f48b"},
+        },
+        { // branch node with short values, then long ones
+            {"a001", "v1", "b9cc982d995392b51e6787f1915f0b88efd4ad8b30f138da0a3e2242f2323e35"},
+            {"b002", "v2", "a7b474bc77ef5097096fa0ee6298fdae8928c0bc3724e7311cd0fa9ed1942fc7"},
+            {"c003", "v___________________________3", "dceb5bb7c92b0e348df988a8d9fc36b101397e38ebd405df55ba6ee5f14a264a"},
+            {"d004", "v___________________________4", "36e60ecb86b9626165e1c6543c42ecbe4d83bca58e8e1124746961511fce362a"},
+        },
+        { // ext node to branch node with short values, then long ones
+            {"8002", "v1", "3258fcb3e9e7d7234ecd3b8d4743999e4ab3a21592565e0a5ca64c141e8620d9"},
+            {"8004", "v2", "b6cb95b7024a83c17624a3c9bed09b4b5e8ed426f49f54b8ad13c39028b1e75a"},
+            {"8008", "v___________________________3", "c769d82963abe6f0900bf69754738eeb2f84559777cfa87a44f54e1aab417871"},
+            {"800d", "v___________________________4", "1cad1fdaab1a6fa95d7b780fd680030e423eb76669971368ba04797a8d9cdfc9"},
+        },
+        { // ext node with a child of size 31 (Y) and branch node with a child of size 31 (X)
+            {"000001", "ZZZZZZZZZ", "cef154b87c03c563408520ff9b26923c360cbc3ddb590c079bedeeb25a8c9c77"},
+            {"000002", "Y", "2130735e600f612f6e657a32bd7be64ddcaec6512c5694844b19de713922895d"},
+            {"000003", "XXXXXXXXXXXXXXXXXXXXXXXXXXXX", "962c0fffdeef7612a4f7bff1950d67e3e81c878e48b9ae45b3b374253b050bd8"},
+        },
     };
     // clang-format on
 
@@ -321,7 +446,7 @@ TEST(state_mpt, trie_topologies)
         // Check if all insert order permutations give the same final hash.
         std::vector<size_t> order(test.size());
         std::iota(order.begin(), order.end(), size_t{0});
-        while (std::next_permutation(order.begin(), order.end()))
+        while (std::ranges::next_permutation(order).found)
         {
             MPT trie;
             for (size_t i = 0; i < test.size(); ++i)

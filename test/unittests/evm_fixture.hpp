@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "evmone/eof.hpp"
 #include <evmc/mocked_host.hpp>
 #include <gtest/gtest.h>
 #include <intx/intx.hpp>
@@ -32,6 +33,9 @@ namespace evmone::test
 class evm : public testing::TestWithParam<evmc::VM*>
 {
 protected:
+    /// Reports if execution is done by evmone/Advanced.
+    static bool is_advanced() noexcept;
+
     /// The VM handle.
     evmc::VM& vm;
 
@@ -74,6 +78,12 @@ protected:
         {
             host.access_account(msg.sender);
             host.access_account(msg.recipient);
+        }
+
+        if (rev >= EVMC_OSAKA && is_eof_container(code))
+        {
+            ASSERT_EQ(get_error_message(validate_eof(rev, ContainerKind::runtime, code)),
+                get_error_message(EOFValidationError::success));
         }
 
         result = vm.execute(host, rev, msg, code.data(), code.size());

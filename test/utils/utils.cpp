@@ -1,34 +1,56 @@
 // evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2018 The evmone Authors.
+// Copyright 2023 The evmone Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "utils.hpp"
 
-#if __GNUC__ >= 12
-// Workaround the bug related to std::regex and std::function:
-// https://gcc.gnu.org/bugzilla/show_bug.cgi?id=105562.
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-#endif
-#include <regex>
-
-bytes from_hexx(const std::string& hexx)
+namespace evmone::test
 {
-    const auto re = std::regex{R"(\((\d+)x([^)]+)\))"};
 
-    auto hex = hexx;
-    auto position_correction = size_t{0};
-    for (auto it = std::sregex_iterator{hexx.begin(), hexx.end(), re}; it != std::sregex_iterator{};
-         ++it)
-    {
-        auto num_repetitions = std::stoi((*it)[1]);
-        auto replacement = std::string{};
-        while (num_repetitions-- > 0)
-            replacement += (*it)[2];
-
-        const auto pos = static_cast<size_t>(it->position()) + position_correction;
-        const auto length = static_cast<size_t>(it->length());
-        hex.replace(pos, length, replacement);
-        position_correction += replacement.length() - length;
-    }
-    return from_spaced_hex(hex).value();
+evmc_revision to_rev(std::string_view s)
+{
+    if (s == "Frontier")
+        return EVMC_FRONTIER;
+    if (s == "Homestead")
+        return EVMC_HOMESTEAD;
+    if (s == "Tangerine Whistle" || s == "EIP150")
+        return EVMC_TANGERINE_WHISTLE;
+    if (s == "Spurious Dragon" || s == "EIP158")
+        return EVMC_SPURIOUS_DRAGON;
+    if (s == "Byzantium")
+        return EVMC_BYZANTIUM;
+    if (s == "Constantinople")
+        return EVMC_CONSTANTINOPLE;
+    if (s == "Petersburg" || s == "ConstantinopleFix")
+        return EVMC_PETERSBURG;
+    if (s == "Istanbul")
+        return EVMC_ISTANBUL;
+    if (s == "Berlin")
+        return EVMC_BERLIN;
+    if (s == "London" || s == "ArrowGlacier")
+        return EVMC_LONDON;
+    if (s == "Paris" || s == "Merge")
+        return EVMC_PARIS;
+    if (s == "Shanghai")
+        return EVMC_SHANGHAI;
+    if (s == "Cancun")
+        return EVMC_CANCUN;
+    if (s == "Prague")
+        return EVMC_PRAGUE;
+    if (s == "Osaka")
+        return EVMC_OSAKA;
+    throw std::invalid_argument{"unknown revision: " + std::string{s}};
 }
+
+RevisionSchedule to_rev_schedule(std::string_view s)
+{
+    if (s == "ShanghaiToCancunAtTime15k")
+        return {EVMC_SHANGHAI, EVMC_CANCUN, 15'000};
+    if (s == "CancunToPragueAtTime15k")
+        return {EVMC_CANCUN, EVMC_PRAGUE, 15'000};
+
+    const auto single_rev = to_rev(s);
+    return {single_rev, single_rev, 0};
+}
+
+}  // namespace evmone::test

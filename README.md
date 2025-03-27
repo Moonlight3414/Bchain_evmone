@@ -17,7 +17,7 @@ The codebase of _evmone_ is optimized to provide fast and efficient execution of
 ### Characteristic of evmone
 
 1. Exposes the [EVMC] API.
-2. Requires C++17 standard.
+2. Requires C++20 standard.
 3. The [intx] library is used to provide 256-bit integer precision.
 4. The [ethash] library is used to provide Keccak hash function implementation
    needed for the special `KECCAK256` instruction.
@@ -73,7 +73,6 @@ To build the evmone EVMC module (shared library), test, and benchmark:
    ```
 
    ##### Windows
-   *Note: >= Visual Studio 2019 is required since evmone makes heavy use of C++17*
    ```
    cmake -S . -B build -DEVMONE_TESTING=ON -G "Visual Studio 16 2019" -A x64
    ```
@@ -87,8 +86,20 @@ To build the evmone EVMC module (shared library), test, and benchmark:
 3. Run the unit tests or benchmarking tool:
    ```
    build/bin/evmone-unittests
-   build/bin/evmone-bench test/benchmarks
+   build/bin/evmone-bench test/evm-benchmarks/benchmarks
    ```
+
+### Precompiles
+
+Ethereum Precompiled Contracts (_precompiles_ for short) are only partly supported by evmone.
+
+However, there are options to enable limited precompiles support for testing.
+
+1. For precompiles with missing implementation stubs are enabled by default.
+   They will correctly respond to known inputs.
+2. The CMake option `EVMONE_PRECOMPILES_SILKPRE=1` enables building of
+   the [silkpre] third party library with the implementation of the precompiles.
+   This library also requires [GMP] (e.g. libgmp-dev) library for building and execution.
 
 ### Tools
 
@@ -115,6 +126,14 @@ with it.
 docker run --entrypoint evmone-bench ethereum/evmone /src/test/benchmarks
 ```
 
+### EVM Object Format (EOF) support
+
+evmone supports EOFv1. Since EOF validation is done once during deploy-time, evmone does not revalidate during execution of bytecode. To force EOF revalidation, you can use the `validate_eof` option, example:
+
+```
+evmc run --vm libevmone.so,validate_eof --rev 14 "EF00"
+```
+
 ## References
 
 1. [Efficient gas calculation algorithm for EVM](docs/efficient_gas_calculation_algorithm.md)
@@ -139,10 +158,12 @@ Licensed under the [Apache License, Version 2.0].
 [EVMC]: https://github.com/ethereum/evmc
 [Ipsilon]: https://github.com/ipsilon
 [Ewasm]: https://github.com/ewasm
+[GMP]: https://gmplib.org
 [intx]: https://github.com/chfast/intx
 [ethash]: https://github.com/chfast/ethash
 [Releases]: https://github.com/ethereum/evmone/releases
 [standard readme]: https://github.com/RichardLitt/standard-readme
+[silkpre]: https://github.com/torquem-ch/silkpre
 
 [appveyor badge]: https://img.shields.io/appveyor/ci/chfast/evmone/master.svg?logo=appveyor
 [circleci badge]: https://img.shields.io/circleci/project/github/ethereum/evmone/master.svg?logo=circleci

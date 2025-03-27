@@ -3,13 +3,17 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
-#include "../state/state.hpp"
-#include <filesystem>
+#include "../state/block.hpp"
+#include "../state/errors.hpp"
+#include "../state/test_state.hpp"
+#include "../state/transaction.hpp"
+#include <nlohmann/json.hpp>
 
-namespace fs = std::filesystem;
+namespace json = nlohmann;
 
 namespace evmone::test
 {
+
 struct TestMultiTransaction : state::Transaction
 {
     struct Indexes
@@ -44,20 +48,100 @@ struct StateTransitionTest
         {
             TestMultiTransaction::Indexes indexes;
             hash256 state_hash;
-            hash256 logs_hash;
+            hash256 logs_hash = EmptyListHash;
             bool exception = false;
         };
 
         evmc_revision rev;
         std::vector<Expectation> expectations;
+        state::BlockInfo block;
     };
 
-    state::State pre_state;
-    state::BlockInfo block;
+    std::string name;
+    TestState pre_state;
+    TestBlockHashes block_hashes;
     TestMultiTransaction multi_tx;
     std::vector<Case> cases;
+    std::unordered_map<uint64_t, std::string> input_labels;
 };
 
-StateTransitionTest load_state_test(const fs::path& test_file);
+template <typename T>
+T from_json(const json::json& j) = delete;
 
+template <>
+uint64_t from_json<uint64_t>(const json::json& j);
+
+template <>
+int64_t from_json<int64_t>(const json::json& j);
+
+template <>
+address from_json<address>(const json::json& j);
+
+template <>
+hash256 from_json<hash256>(const json::json& j);
+
+template <>
+bytes from_json<bytes>(const json::json& j);
+
+state::BlockInfo from_json_with_rev(const json::json& j, evmc_revision rev);
+
+template <>
+TestBlockHashes from_json<TestBlockHashes>(const json::json& j);
+
+template <>
+state::Withdrawal from_json<state::Withdrawal>(const json::json& j);
+
+template <>
+TestState from_json<TestState>(const json::json& j);
+
+template <>
+state::Transaction from_json<state::Transaction>(const json::json& j);
+
+/// Exports the State (accounts) to JSON format (aka pre/post/alloc state).
+json::json to_json(const TestState& state);
+
+/// Returns the standardized error message for the transaction validation error.
+[[nodiscard]] std::string get_invalid_tx_message(state::ErrorCode errc) noexcept;
+
+
+std::vector<StateTransitionTest> load_state_tests(std::istream& input);
+
+/// Validates an Ethereum state:
+/// - checks that there are no zero-value storage entries,
+/// - checks that there are no invalid EOF codes.
+/// Throws std::invalid_argument exception.
+void validate_state(const TestState& state, evmc_revision rev);
+
+/// Execute the state @p test using the @p vm.
+///
+/// @param trace_summary  Output execution summary to the default trace stream.
+void run_state_test(const StateTransitionTest& test, evmc::VM& vm, bool trace_summary);
+
+/// Computes the hash of the RLP-encoded list of transaction logs.
+/// This method is only used in tests.
+hash256 logs_hash(const std::vector<state::Log>& logs);
+
+/// Converts an integer to hex string representation with 0x prefix.
+///
+/// This handles also builtin types like uint64_t. Not optimal but works for now.
+inline std::string hex0x(const intx::uint256& v)
+{
+    return "0x" + intx::hex(v);
+}
+
+/// Encodes bytes as hex with 0x prefix.
+inline std::string hex0x(const bytes_view& v)
+{
+    return "0x" + evmc::hex(v);
+}
 }  // namespace evmone::test
+
+inline std::ostream& operator<<(std::ostream& out, const evmone::address& a)
+{
+    return out << evmone::test::hex0x(a);
+}
+
+inline std::ostream& operator<<(std::ostream& out, const evmone::bytes32& b)
+{
+    return out << evmone::test::hex0x(b);
+}

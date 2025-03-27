@@ -3,11 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "evm_fixture.hpp"
+#include <evmone/constants.hpp>
 #include <numeric>
 
 using namespace evmc::literals;
 using namespace intx;
-using evmone::test::evm;
+using namespace evmone::test;
 
 TEST_P(evm, empty)
 {
@@ -52,7 +53,7 @@ TEST_P(evm, stack_underflow)
 
 TEST_P(evm, add)
 {
-    execute(25, bytecode{"6007600d0160005260206000f3"});
+    execute(25, add(7, 13) + ret_top());
     EXPECT_GAS_USED(EVMC_SUCCESS, 24);
     EXPECT_OUTPUT_INT(20);
 }
@@ -94,8 +95,8 @@ TEST_P(evm, dup_stack_underflow)
 {
     for (int i = 0; i < 16; ++i)
     {
-        const auto op = evmc_opcode(OP_DUP1 + i);
-        execute((i * push(0)) + op);
+        const auto op = static_cast<Opcode>(OP_DUP1 + i);
+        execute(i * push(0) + op);
         EXPECT_STATUS(EVMC_STACK_UNDERFLOW);
     }
 }
@@ -377,6 +378,7 @@ TEST_P(evm, signextend_fuzzing)
             input[63] = e;
             execute(code, {input, 64});
             ASSERT_EQ(output.size(), sizeof(uint256));
+            // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
             const auto out = be::unsafe::load<uint256>(output.data());
             const auto expected = signextend_reference(be::unsafe::load<uint256>(input), e);
             ASSERT_EQ(out, expected);
@@ -623,12 +625,10 @@ TEST_P(evm, undefined_instructions)
 {
     for (auto i = 0; i <= EVMC_MAX_REVISION; ++i)
     {
-        auto r = evmc_revision(i);
-        auto names = evmc_get_instruction_names_table(r);
-
+        const auto r = evmc_revision(i);
         for (uint8_t opcode = 0; opcode <= 0xfe; ++opcode)
         {
-            if (names[opcode] != nullptr)
+            if (evmone::instr::gas_costs[r][opcode] != evmone::instr::undefined)
                 continue;
 
             auto res = vm.execute(host, r, {}, &opcode, sizeof(opcode));
@@ -642,10 +642,7 @@ TEST_P(evm, undefined_instruction_analysis_overflow)
 {
     rev = EVMC_PETERSBURG;
 
-    auto undefined_opcode = evmc_opcode(0x0c);
-    auto code = bytecode{undefined_opcode};
-
-    execute(code);
+    execute(bytecode{"0c"});  // undefined opcode
     EXPECT_EQ(result.status_code, EVMC_UNDEFINED_INSTRUCTION);
 }
 
@@ -696,9 +693,8 @@ TEST_P(evm, staticmode)
 
 TEST_P(evm, max_code_size_push1)
 {
-    constexpr auto max_code_size = 0x6000;
-    const auto code = (max_code_size / 2) * push(1);
-    ASSERT_EQ(code.size(), max_code_size);
+    const auto code = (evmone::MAX_CODE_SIZE / 2) * push(1);
+    ASSERT_EQ(code.size(), evmone::MAX_CODE_SIZE);
 
     execute(code);
     EXPECT_STATUS(EVMC_STACK_OVERFLOW);

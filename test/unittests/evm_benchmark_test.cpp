@@ -10,7 +10,7 @@
 #include <random>
 
 using namespace evmc::literals;
-using evmone::test::evm;
+using namespace evmone::test;
 
 TEST_P(evm, grow_memory_with_mload)
 {
@@ -106,8 +106,8 @@ TEST_P(evm, signextend_bench)
     code += calldataload(0);
     for (size_t i = 0; i < num_instr; ++i)
     {
-        code += bytecode{static_cast<evmc_opcode>(OP_DUP2 + (i % std::size(byte_indexes)))} +
-                OP_SIGNEXTEND;
+        code +=
+            bytecode{static_cast<Opcode>(OP_DUP2 + (i % std::size(byte_indexes)))} + OP_SIGNEXTEND;
     }
     code += ret_top();
     ASSERT_EQ(code.size(), 24041);

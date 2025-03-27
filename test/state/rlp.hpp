@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <evmc/bytes.hpp>
 #include <intx/intx.hpp>
 #include <cassert>
 #include <string>
@@ -13,15 +14,15 @@
 
 namespace evmone::rlp
 {
-using bytes = std::basic_string<uint8_t>;
-using bytes_view = std::basic_string_view<uint8_t>;
+using evmc::bytes;
+using evmc::bytes_view;
 
 namespace internal
 {
 template <uint8_t ShortBase, uint8_t LongBase>
 inline bytes encode_length(size_t l)
 {
-    static constexpr auto short_cutoff = 55;
+    static constexpr uint8_t short_cutoff = 55;
     static_assert(ShortBase + short_cutoff <= 0xff);
     assert(l <= 0xffffff);
 
@@ -96,6 +97,13 @@ template <typename... Types>
 inline bytes encode_tuple(const Types&... elements)
 {
     return internal::wrap_list((encode(elements) + ...));
+}
+
+/// Encodes a pair of values as RPL list.
+template <typename T1, typename T2>
+inline bytes encode(const std::pair<T1, T2>& p)
+{
+    return encode_tuple(p.first, p.second);
 }
 
 /// Encodes the container as RLP list.

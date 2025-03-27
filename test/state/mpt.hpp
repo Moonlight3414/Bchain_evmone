@@ -8,11 +8,16 @@
 
 namespace evmone::state
 {
-constexpr auto emptyMPTHash =
-    0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421_bytes32;
-
 /// Insert-only Merkle Patricia Trie implementation for getting the root hash
 /// out of (key, value) pairs.
+///
+/// Limitations:
+/// 1. A key must not be longer than 32 bytes. Protected by debug assert.
+/// 2. A key must not be a prefix of another key. Protected by debug assert.
+///    This comes from the spec (Yellow Paper Appendix D) - a branch node cannot store a value.
+/// 3. A key must be unique. Protected by debug assert.
+///    I.e. inserted values cannot be updated by inserting with the same key again.
+/// 4. Inserted values cannot be erased. There is no method for this.
 class MPT
 {
     std::unique_ptr<class MPTNode> m_root;

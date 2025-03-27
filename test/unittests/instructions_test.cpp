@@ -2,11 +2,17 @@
 // Copyright 2019 The evmone Authors.
 // SPDX-License-Identifier: Apache-2.0
 
-#include <evmc/instructions.h>
 #include <evmone/advanced_analysis.hpp>
 #include <evmone/instructions_traits.hpp>
 #include <gtest/gtest.h>
 #include <test/utils/bytecode.hpp>
+
+namespace
+{
+// Temporarily include EVMC instructions in an inline namespace so that evmc_opcode enum
+// doesn't name clash with evmone::Opcode but the evmc_ functions are accessible.
+#include <evmc/instructions.h>
+}  // namespace
 
 using namespace evmone;
 
@@ -16,7 +22,7 @@ namespace
 {
 constexpr int unspecified = -1000000;
 
-constexpr int get_revision_defined_in(size_t op) noexcept
+constexpr int get_revision_defined_in(uint8_t op) noexcept
 {
     for (size_t r = EVMC_FRONTIER; r <= EVMC_MAX_REVISION; ++r)
     {
@@ -26,12 +32,15 @@ constexpr int get_revision_defined_in(size_t op) noexcept
     return unspecified;
 }
 
-constexpr bool is_terminating(evmc_opcode op) noexcept
+constexpr bool is_terminating(uint8_t op) noexcept
 {
     switch (op)
     {
     case OP_STOP:
     case OP_RETURN:
+    case OP_RETF:
+    case OP_JUMPF:
+    case OP_RETURNCONTRACT:
     case OP_REVERT:
     case OP_INVALID:
     case OP_SELFDESTRUCT:
@@ -41,7 +50,7 @@ constexpr bool is_terminating(evmc_opcode op) noexcept
     }
 }
 
-template <evmc_opcode Op>
+template <uint8_t Op>
 constexpr void validate_traits_of() noexcept
 {
     constexpr auto tr = instr::traits[Op];
@@ -49,17 +58,33 @@ constexpr void validate_traits_of() noexcept
     // immediate_size
     if constexpr (Op >= OP_PUSH1 && Op <= OP_PUSH32)
         static_assert(tr.immediate_size == Op - OP_PUSH1 + 1);
+    else if constexpr (Op == OP_RJUMP || Op == OP_RJUMPI || Op == OP_CALLF || Op == OP_JUMPF)
+        static_assert(tr.immediate_size == 2);
+    else if constexpr (Op == OP_RJUMPV)
+        static_assert(tr.immediate_size == 1);
+    else if constexpr (Op == OP_DUPN || Op == OP_SWAPN || Op == OP_EXCHANGE || Op == OP_EOFCREATE ||
+                       Op == OP_RETURNCONTRACT)
+        static_assert(tr.immediate_size == 1);
+    else if constexpr (Op == OP_DATALOADN)
+        static_assert(tr.immediate_size == 2);
+    else if constexpr (Op == OP_ADDMODX || Op == OP_SUBMODX || Op == OP_MULMODX)
+        static_assert(tr.immediate_size == 7);
+    else if constexpr (Op == OP_INVMODX)
+        static_assert(tr.immediate_size == 5);
     else
-        static_assert(tr.immediate_size == 0);
+        static_assert(tr.immediate_size == 0);  // Including RJUMPV.
 
     // is_terminating
     static_assert(tr.is_terminating == is_terminating(Op));
-    static_assert(!tr.is_terminating || tr.immediate_size == 0,
-        "terminating instructions must not have immediate bytes - this simplifies EOF validation");
 
     // since
     constexpr auto expected_rev = get_revision_defined_in(Op);
-    static_assert(tr.since.has_value() ? *tr.since == expected_rev : expected_rev == unspecified);
+    constexpr auto since =
+        tr.since.has_value() ?
+            // NOLINTNEXTLINE(readability-avoid-nested-conditional-operator)
+            tr.eof_since.has_value() ? std::min(*tr.since, *tr.eof_since) : *tr.since :
+            tr.eof_since;
+    static_assert(since.has_value() ? *since == expected_rev : expected_rev == unspecified);
 }
 
 template <std::size_t... Ops>
@@ -67,7 +92,7 @@ constexpr bool validate_traits(std::index_sequence<Ops...>)
 {
     // Instantiate validate_traits_of for each opcode.
     // Validation errors are going to be reported via static_asserts.
-    (validate_traits_of<static_cast<evmc_opcode>(Ops)>(), ...);
+    (validate_traits_of<static_cast<Opcode>(Ops)>(), ...);
     return true;
 }
 static_assert(validate_traits(std::make_index_sequence<256>{}));
@@ -81,8 +106,56 @@ static_assert(!instr::has_const_gas_cost(OP_SHL));
 static_assert(!instr::has_const_gas_cost(OP_BALANCE));
 static_assert(!instr::has_const_gas_cost(OP_SLOAD));
 }  // namespace
+
 }  // namespace evmone::test
 
+namespace
+{
+// TODO: Coordinate with evmc::instructions library to remove the differences and this file
+constexpr bool instruction_only_in_evmone(evmc_revision rev, Opcode op) noexcept
+{
+    if (rev < EVMC_CANCUN)
+        return false;
+
+    switch (op)
+    {
+    case OP_SETUPX:
+    case OP_ADDMODX:
+    case OP_SUBMODX:
+    case OP_MULMODX:
+    case OP_INVMODX:
+    case OP_LOADX:
+    case OP_STOREX:
+    case OP_BLOBHASH:
+    case OP_BLOBBASEFEE:
+    case OP_RJUMP:
+    case OP_RJUMPI:
+    case OP_RJUMPV:
+    case OP_CALLF:
+    case OP_RETF:
+    case OP_JUMPF:
+    case OP_DUPN:
+    case OP_SWAPN:
+    case OP_EXCHANGE:
+    case OP_MCOPY:
+    case OP_DATALOAD:
+    case OP_DATALOADN:
+    case OP_DATASIZE:
+    case OP_DATACOPY:
+    case OP_RETURNDATALOAD:
+    case OP_TLOAD:
+    case OP_TSTORE:
+    case OP_EXTCALL:
+    case OP_EXTDELEGATECALL:
+    case OP_EXTSTATICCALL:
+    case OP_EOFCREATE:
+    case OP_RETURNCONTRACT:
+        return true;
+    default:
+        return false;
+    }
+}
+}  // namespace
 
 TEST(instructions, compare_with_evmc_instruction_tables)
 {
@@ -95,13 +168,16 @@ TEST(instructions, compare_with_evmc_instruction_tables)
 
         for (size_t i = 0; i < evmone_tbl.size(); ++i)
         {
+            if (instruction_only_in_evmone(rev, Opcode(i)))
+                continue;
+
             const auto gas_cost = (instr_tbl[i] != instr::undefined) ? instr_tbl[i] : 0;
             const auto& metrics = evmone_tbl[i];
             const auto& ref_metrics = evmc_tbl[i];
 
             const auto case_descr = [rev](size_t opcode) {
                 auto case_descr_str = std::ostringstream{};
-                case_descr_str << "opcode " << to_name(evmc_opcode(opcode), rev);
+                case_descr_str << "opcode " << instr::traits[opcode].name;
                 case_descr_str << " on revision " << rev;
                 return case_descr_str.str();
             };
@@ -123,7 +199,12 @@ TEST(instructions, compare_undefined_instructions)
         const auto* evmc_names_tbl = evmc_get_instruction_names_table(rev);
 
         for (size_t i = 0; i < instr_tbl.size(); ++i)
+        {
+            if (instruction_only_in_evmone(rev, Opcode(i)))
+                continue;
+
             EXPECT_EQ(instr_tbl[i] == instr::undefined, evmc_names_tbl[i] == nullptr) << i;
+        }
     }
 }
 
@@ -132,6 +213,9 @@ TEST(instructions, compare_with_evmc_instruction_names)
     const auto* evmc_tbl = evmc_get_instruction_names_table(EVMC_MAX_REVISION);
     for (size_t i = 0; i < instr::traits.size(); ++i)
     {
+        if (instruction_only_in_evmone(EVMC_MAX_REVISION, Opcode(i)))
+            continue;
+
         EXPECT_STREQ(instr::traits[i].name, evmc_tbl[i]);
     }
 }
