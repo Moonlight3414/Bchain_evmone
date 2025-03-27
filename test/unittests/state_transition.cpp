@@ -48,6 +48,7 @@ void state_transition::TearDown()
 
     // Execution:
 
+    auto state = pre;
     const auto trace = !expect.trace.empty();
     auto& selected_vm = trace ? tracing_vm : vm;
 
@@ -56,12 +57,10 @@ void state_transition::TearDown()
     if (trace)
         trace_capture.emplace();
 
-    auto intra_state = pre.to_intra_state();
-    const auto res = state::transition(intra_state, block, tx, rev, selected_vm, block.gas_limit,
-        state::BlockInfo::MAX_BLOB_GAS_PER_BLOCK);
-    state::finalize(
-        intra_state, rev, block.coinbase, block_reward, block.ommers, block.withdrawals);
-    TestState post{intra_state};
+    const auto res = test::transition(state, block, block_hashes, tx, rev, selected_vm,
+        block.gas_limit, static_cast<int64_t>(state::max_blob_gas_per_block(rev)));
+    test::finalize(state, rev, block.coinbase, block_reward, block.ommers, block.withdrawals);
+    const auto& post = state;
 
     if (const auto expected_error = make_error_code(expect.tx_error))
     {
@@ -86,7 +85,7 @@ void state_transition::TearDown()
         }
         // Update default expectations - valid transaction means coinbase exists unless explicitly
         // requested otherwise
-        if (expect.post.find(Coinbase) == expect.post.end())
+        if (!expect.post.contains(Coinbase))
             expect.post[Coinbase].exists = true;
     }
 
@@ -180,6 +179,7 @@ void state_transition::export_state_test(
     jenv["currentGasLimit"] = hex0x(block.gas_limit);
     jenv["currentCoinbase"] = hex0x(block.coinbase);
     jenv["currentBaseFee"] = hex0x(block.base_fee);
+    jenv["currentRandom"] = hex0x(block.prev_randao);
 
     jt["pre"] = to_json(pre);
 
@@ -189,27 +189,24 @@ void state_transition::export_state_test(
     jtx["sender"] = hex0x(tx.sender);
     jtx["secretKey"] = hex0x(SenderSecretKey);
     jtx["nonce"] = hex0x(tx.nonce);
-    if (rev < EVMC_LONDON)
-    {
-        assert(tx.max_gas_price == tx.max_priority_gas_price);
-        jtx["gasPrice"] = hex0x(tx.max_gas_price);
-    }
-    else
+    if (tx.type >= Transaction::Type::eip1559)
     {
         jtx["maxFeePerGas"] = hex0x(tx.max_gas_price);
         jtx["maxPriorityFeePerGas"] = hex0x(tx.max_priority_gas_price);
     }
-
-    if (tx.type == Transaction::Type::initcodes)
+    else
     {
-        auto& jinitcodes = jtx["initcodes"] = json::json::array();
-        for (const auto& initcode : tx.initcodes)
-            jinitcodes.emplace_back(hex0x(initcode));
+        assert(tx.max_gas_price == tx.max_priority_gas_price);
+        jtx["gasPrice"] = hex0x(tx.max_gas_price);
     }
 
     jtx["data"][0] = hex0x(tx.data);
     jtx["gasLimit"][0] = hex0x(tx.gas_limit);
     jtx["value"][0] = hex0x(tx.value);
+
+    // Force `accessLists` output even if empty.
+    if (tx.type >= Transaction::Type::access_list)
+        jtx["accessLists"][0] = json::json::array();
 
     if (!tx.access_list.empty())
     {
@@ -225,14 +222,43 @@ void state_transition::export_state_test(
         }
     }
 
+    if (tx.type == Transaction::Type::blob)
+    {
+        jtx["maxFeePerBlobGas"] = hex0x(tx.max_blob_gas_price);
+        jtx["blobVersionedHashes"] = json::json::array();
+        for (const auto& blob_hash : tx.blob_hashes)
+        {
+            jtx["blobVersionedHashes"].emplace_back(hex0x(blob_hash));
+        }
+    }
+
+    if (!tx.authorization_list.empty())
+    {
+        auto& ja = jtx["authorizationList"];
+        for (const auto& [chain_id, addr, nonce, signer, r, s, y_parity] : tx.authorization_list)
+        {
+            json::json je;
+            je["chainId"] = hex0x(chain_id);
+            je["address"] = hex0x(addr);
+            je["nonce"] = hex0x(nonce);
+            je["v"] = hex0x(y_parity);
+            je["r"] = hex0x(r);
+            je["s"] = hex0x(s);
+            if (signer.has_value())
+                je["signer"] = hex0x(*signer);
+            ja.emplace_back(std::move(je));
+        }
+    }
+
+
     auto& jpost = jt["post"][to_test_fork_name(rev)][0];
     jpost["indexes"] = {{"data", 0}, {"gas", 0}, {"value", 0}};
     jpost["hash"] = hex0x(mpt_hash(post));
 
     if (holds_alternative<std::error_code>(res))
     {
-        jpost["expectException"] = get_tests_invalid_tx_message(
-            static_cast<ErrorCode>(std::get<std::error_code>(res).value()));
+        jpost["expectException"] =
+            get_invalid_tx_message(static_cast<ErrorCode>(std::get<std::error_code>(res).value()));
         jpost["logs"] = hex0x(logs_hash(std::vector<Log>()));
     }
     else

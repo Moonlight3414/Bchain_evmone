@@ -12,7 +12,7 @@ namespace evmone::test
 void run_state_test(const StateTransitionTest& test, evmc::VM& vm, bool trace_summary)
 {
     SCOPED_TRACE(test.name);
-    for (const auto& [rev, cases] : test.cases)
+    for (const auto& [rev, cases, block] : test.cases)
     {
         validate_state(test.pre_state, rev);
         for (size_t case_index = 0; case_index != cases.size(); ++case_index)
@@ -25,15 +25,15 @@ void run_state_test(const StateTransitionTest& test, evmc::VM& vm, bool trace_su
 
             const auto& expected = cases[case_index];
             const auto tx = test.multi_tx.get(expected.indexes);
-            auto state = test.pre_state.to_intra_state();
+            auto state = test.pre_state;
 
-            const auto res = state::transition(state, test.block, tx, rev, vm, test.block.gas_limit,
-                state::BlockInfo::MAX_BLOB_GAS_PER_BLOCK);
+            const auto res = test::transition(state, block, test.block_hashes, tx, rev, vm,
+                block.gas_limit, static_cast<int64_t>(state::max_blob_gas_per_block(rev)));
 
             // Finalize block with reward 0.
-            state::finalize(state, rev, test.block.coinbase, 0, {}, {});
+            test::finalize(state, rev, block.coinbase, 0, {}, {});
 
-            const auto state_root = state::mpt_hash(TestState{state});
+            const auto state_root = state::mpt_hash(state);
 
             if (trace_summary)
             {

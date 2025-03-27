@@ -51,12 +51,17 @@ Checks:
   - "-misc-use-anonymous-namespace"
   - "modernize-*"
   - "-modernize-avoid-c-arrays"
+  - "-modernize-use-nodiscard"
+  # Designated initializers are nice, but should not be used all the time.
+  - "-modernize-use-designated-initializers"
   - "-modernize-use-trailing-return-type"
   - "performance-*"
   - "-performance-enum-size"
   - "portability-*"
   - "readability-*"
   - "-readability-braces-around-statements"
+  # Sometimes we actually want to take the address of the first element.
+  - "-readability-container-data-pointer"
   - "-readability-else-after-return"
   - "-readability-function-cognitive-complexity"
   - "-readability-function-size"
@@ -64,9 +69,9 @@ Checks:
   - "-readability-magic-numbers"
   - "-readability-named-parameter"
   - "-readability-qualified-auto"
-  # TODO: Check if removing inline affects clang optimized builds.
-  - "-readability-redundant-inline-specifier"
   - "-readability-uppercase-literal-suffix"
+  # This is too noisy about multiplication and addition precedence.
+  - "-readability-math-missing-parentheses"
 
 CheckOptions:
   readability-identifier-naming.ClassCase: CamelCase

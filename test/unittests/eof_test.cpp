@@ -4,6 +4,7 @@
 
 #include <evmone/eof.hpp>
 #include <gtest/gtest.h>
+#include <test/state/hash_utils.hpp>
 #include <test/utils/bytecode.hpp>
 #include <test/utils/utils.hpp>
 
@@ -94,13 +95,14 @@ TEST(eof, read_valid_eof1_header)
     {
         const auto code = from_spaced_hex(test_case.code).value();
         EXPECT_EQ(
-            validate_eof(EVMC_PRAGUE, ContainerKind::runtime, code), EOFValidationError::success)
+            validate_eof(EVMC_OSAKA, ContainerKind::runtime, code), EOFValidationError::success)
             << test_case.code;
 
         const auto header = read_valid_eof1_header(code);
         EXPECT_EQ(header.code_sizes, test_case.code_sizes) << test_case.code;
         EXPECT_EQ(header.data_size, test_case.data_size) << test_case.code;
-        EXPECT_EQ(header.types.size() * 4, test_case.types_size) << test_case.code;
+        EXPECT_EQ(header.get_type_count(), test_case.types_size / EOF1Header::TYPE_ENTRY_SIZE)
+            << test_case.code;
         EXPECT_EQ(header.container_sizes, test_case.container_sizes) << test_case.code;
     }
 }
@@ -114,4 +116,9 @@ TEST(eof, get_error_message)
 
     // NOLINTNEXTLINE(*.EnumCastOutOfRange)
     EXPECT_EQ(evmone::get_error_message(static_cast<EOFValidationError>(-1)), "<unknown>");
+}
+
+TEST(eof, extcodehash_sentinel)
+{
+    EXPECT_EQ(keccak256(EOF_MAGIC), EOF_CODE_HASH_SENTINEL);
 }

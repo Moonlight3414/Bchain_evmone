@@ -6,6 +6,9 @@
 #include "instructions.hpp"
 #include "instructions_traits.hpp"
 
+// TODO: This warning suppression may be lifted, but the situation in this file is complicated.
+// NOLINTBEGIN(misc-use-internal-linkage)
+
 namespace evmone::advanced
 {
 namespace instr
@@ -91,6 +94,15 @@ template <Opcode Op, code_iterator CoreFn(StackTop, code_iterator) noexcept = co
 inline code_iterator impl(AdvancedExecutionState& state, code_iterator pos) noexcept
 {
     const auto new_pos = CoreFn(state.stack, pos);
+    state.adjust_stack_size(instr::traits[Op].stack_height_change);
+    return new_pos;
+}
+
+template <Opcode Op, code_iterator CoreFn(StackTop, ExecutionState&, code_iterator,
+                         int64_t&) noexcept = core::impl<Op>>
+inline code_iterator impl(AdvancedExecutionState& state, code_iterator pos) noexcept
+{
+    const auto new_pos = CoreFn(state.stack, state, pos, state.gas_left);
     state.adjust_stack_size(instr::traits[Op].stack_height_change);
     return new_pos;
 }
@@ -310,8 +322,15 @@ constexpr std::array<instruction_exec_fn, 256> instruction_implementations = [](
     table[OP_SWAPN] = op_undefined;
     table[OP_EXCHANGE] = op_undefined;
     table[OP_EOFCREATE] = op_undefined;
-    table[OP_TXCREATE] = op_undefined;
     table[OP_RETURNCONTRACT] = op_undefined;
+
+    table[OP_SETUPX] = op_undefined;
+    table[OP_LOADX] = op_undefined;
+    table[OP_STOREX] = op_undefined;
+    table[OP_ADDMODX] = op_undefined;
+    table[OP_SUBMODX] = op_undefined;
+    table[OP_MULMODX] = op_undefined;
+    table[OP_INVMODX] = op_undefined;
 
     return table;
 }();
@@ -348,3 +367,5 @@ EVMC_EXPORT const OpTable& get_op_table(evmc_revision rev) noexcept
     return op_tables[rev];
 }
 }  // namespace evmone::advanced
+
+// NOLINTEND(misc-use-internal-linkage)

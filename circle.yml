@@ -1,29 +1,29 @@
 version: 2.1
 orbs:
-  codecov: codecov/codecov@4.1.0
+  codecov: codecov/codecov@5.0.3
   win: circleci/windows@5.0
 
 executors:
   lint:
     docker:
-      - image: ethereum/cpp-build-env:22-lint
+      - image: ethereum/cpp-build-env:23-lint
     resource_class: small
     environment:
       CMAKE_BUILD_PARALLEL_LEVEL: 2
   linux-gcc-latest:
     docker:
-      - image: ethereum/cpp-build-env:22-gcc-14
+      - image: ethereum/cpp-build-env:23-gcc-14
     environment:
       CMAKE_BUILD_PARALLEL_LEVEL: 4
   linux-gcc-multilib:
     docker:
-      - image: ethereum/cpp-build-env:22-gcc-14-multilib
+      - image: ethereum/cpp-build-env:23-gcc-14-multilib
     resource_class: small
     environment:
       CMAKE_BUILD_PARALLEL_LEVEL: 2
   linux-clang-xlarge:
     docker:
-      - image: ethereum/cpp-build-env:22-clang-18
+      - image: ethereum/cpp-build-env:23-clang-19
     resource_class: xlarge
     environment:
       CMAKE_BUILD_PARALLEL_LEVEL: 8
@@ -41,7 +41,7 @@ executors:
       CMAKE_BUILD_PARALLEL_LEVEL: 2
   linux-clang-latest:
     docker:
-      - image: ethereum/cpp-build-env:22-clang-18
+      - image: ethereum/cpp-build-env:23-clang-19
     environment:
       CMAKE_BUILD_PARALLEL_LEVEL: 4
   linux-clang-min:
@@ -59,7 +59,7 @@ executors:
   macos:
     resource_class: macos.m1.large.gen1
     macos:
-      xcode: 15.4.0
+      xcode: 16.2.0
     environment:
       CMAKE_BUILD_PARALLEL_LEVEL: 8
   macos-xcode-min:
@@ -142,6 +142,7 @@ commands:
           name: "Download execution-spec-tests: <<parameters.release>>"
           working_directory: ~/spec-tests
           command: |
+            find . -delete
             curl -L https://github.com/<<parameters.repo>>/releases/download/<<parameters.release>>/fixtures_<<parameters.fixtures_suffix>>.tar.gz | tar -xz
             ls -l
 
@@ -224,8 +225,8 @@ commands:
         type: string
     steps:
       - codecov/upload:
-          upload_args: --plugin noop
-          file: ../build/coverage.json
+          plugins: noop
+          files: ../build/coverage.json
           flags: <<parameters.flags>>
 
   package:
@@ -352,7 +353,7 @@ jobs:
     steps:
       - build
       - download_execution_spec_tests:
-          release: v3.0.0
+          release: v4.0.0
       - run:
           name: "Execution spec tests (state_tests)"
           working_directory: ~/build
@@ -363,6 +364,22 @@ jobs:
           working_directory: ~/build
           command: >
             bin/evmone-blockchaintest ~/spec-tests/fixtures/blockchain_tests
+      - download_execution_spec_tests:
+          release: v4.0.0
+          fixtures_suffix: develop
+      - run:
+          name: "Execution spec tests (develop, state_tests)"
+          # Tests for in-development EVM revision currently passing.
+          working_directory: ~/spec-tests/fixtures/state_tests
+          command: >
+            ~/build/bin/evmone-statetest ~/spec-tests/fixtures/state_tests
+      - run:
+          name: "Execution spec tests (develop, blockchain_tests)"
+          # Tests for in-development EVM revision currently passing.
+          working_directory: ~/spec-tests/fixtures/blockchain_tests
+          command: >
+            ~/build/bin/evmone-blockchaintest ~/spec-tests/fixtures/blockchain_tests
+            --gtest_filter='-*block_hashes.block_hashes_history'
       - collect_coverage_gcc
       - upload_coverage:
           flags: execution_spec_tests
@@ -374,18 +391,21 @@ jobs:
     steps:
       - build
       - download_execution_spec_tests:
-          release: eip7692@v1.0.7
+          release: eip7692@v2.1.0
           fixtures_suffix: eip7692
       - run:
           name: "EOF pre-release execution spec tests (state_tests)"
           working_directory: ~/build
           command: >
-            bin/evmone-statetest ~/spec-tests/fixtures/state_tests
-      - run:
-          name: "EOF pre-release execution spec tests (blockchain_tests)"
-          working_directory: ~/build
-          command: >
-            bin/evmone-blockchaintest ~/spec-tests/fixtures/blockchain_tests
+            bin/evmone-statetest ~/spec-tests/fixtures/state_tests/osaka
+      # TODO: EOF blockchain tests are not yet compatible with pectra-devnet-5.
+      # - run:
+      #     name: "EOF pre-release execution spec tests (blockchain_tests)"
+      #     working_directory: ~/build
+      #     command: >
+      #       bin/evmone-blockchaintest
+      #       --gtest_filter='-eofwrap/*'
+      #       ~/spec-tests/fixtures/blockchain_tests/osaka
       - run:
           name: "EOF pre-release execution spec tests (eof_tests)"
           working_directory: ~/build
@@ -402,7 +422,8 @@ jobs:
     steps:
       - build
       - download_execution_tests:
-          rev: v14.0
+          # Latest commit from the main "develop" branch of ethereum/tests.
+          commit: 4c87ebbf024a3e9ec842bcce90564f629a3bcd82
       - run:
           name: "State tests"
           working_directory: ~/build
@@ -412,17 +433,10 @@ jobs:
             ~/tests/LegacyTests/Cancun/GeneralStateTests
             ~/tests/LegacyTests/Constantinople/GeneralStateTests
       - run:
-          name: "EOF State tests"
+          name: "EOF validation tests"
           working_directory: ~/build
-          command: |
-            bin/evmone-statetest ~/tests/EIPTests/StateTests/stEOF
-      - run:
-          name: "EOF validation tests (+exclusion list)"
-          working_directory: ~/build
-          # The outdated tests are excluded.
           command: >
             bin/evmone-eoftest ~/tests/EOFTests
-            --gtest_filter=-EIP3540.validInvalid:efExample.validInvalid:efValidation.EOF1_embedded_container_:efValidation.EOF1_eofcreate_valid_:efValidation.EOF1_returncontract_valid_:efValidation.EOF1_section_order_:efValidation.EOF1_truncated_section_:efValidation.EOF1_undefined_opcodes_:ori.validInvalid
       - run:
           name: "Blockchain tests (GeneralStateTests)"
           working_directory: ~/build
@@ -438,30 +452,6 @@ jobs:
             --gtest_filter='*:-bcMultiChainTest.*:bcTotalDifficultyTest.*:bcForkStressTest.ForkStressTest:bcGasPricerTest.RPC_API_Test:bcValidBlockTest.SimpleTx3LowS'
             ~/tests/BlockchainTests/ValidBlocks
             ~/tests/LegacyTests/Cancun/BlockchainTests/ValidBlocks
-      - run:
-          name: "Blockchain tests (EIPs)"
-          working_directory: ~/build
-          command: >
-            bin/evmone-blockchaintest
-            --gtest_filter='-*StateTests/stEOF/*.*:*StateTests/stEIP2537.*'
-            ~/tests/EIPTests/BlockchainTests/
-      - download_execution_tests:
-          repo: ipsilon/tests
-          rev: eof-toplevel
-          legacy: false
-      - run:
-          name: "EOF State tests (ipsilon fork)"
-          working_directory: ~/build
-          command: |
-            bin/evmone-statetest ~/tests/EIPTests/StateTests/stEOF
-      - run:
-          name: "EOF validation tests (ipsilon fork)"
-          working_directory: ~/build
-          # TODO: Disabled tests:
-          #   efValidation.EOF1_embedded_container_:efValidation.EOF1_eofcreate_valid_:efValidation.EOF1_section_order_: unreferenced subcontainer
-          command: >
-            bin/evmone-eoftest ~/tests/EOFTests
-            --gtest_filter=-:efValidation.EOF1_embedded_container_:efValidation.EOF1_eofcreate_valid_:efValidation.EOF1_section_order_
       - collect_coverage_gcc
       - upload_coverage:
           flags: ethereum_tests
@@ -477,7 +467,7 @@ jobs:
           command: sudo apt-get -q update && sudo apt-get -qy install libgmp-dev
       - build
       - download_execution_tests:
-          rev: v14.0
+          rev: v14.1
           legacy: false
       - run:
           name: "State tests"
@@ -539,6 +529,7 @@ jobs:
   clang-latest-sanitizers:
     executor: linux-clang-xlarge
     environment:
+      TOOLCHAIN: clang-libcxx-debug
       CMAKE_OPTIONS: -DBUILD_SHARED_LIBS=NO -DSANITIZE=address,undefined,shift-exponent,implicit-conversion,nullability
       UBSAN_OPTIONS: halt_on_error=1
     steps:

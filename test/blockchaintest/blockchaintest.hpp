@@ -3,9 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "../state/block.hpp"
 #include "../state/bloom_filter.hpp"
-#include "../state/state.hpp"
 #include "../state/test_state.hpp"
+#include "../state/transaction.hpp"
 #include "../utils/utils.hpp"
 #include <evmc/evmc.hpp>
 #include <span>
@@ -38,13 +39,16 @@ struct BlockHeader
     hash256 transactions_root;
     hash256 withdrawal_root;
     hash256 parent_beacon_block_root;
-    uint64_t excess_blob_gas;
+    std::optional<uint64_t> blob_gas_used;
+    std::optional<uint64_t> excess_blob_gas;
+    hash256 requests_hash;
 };
 
 struct TestBlock
 {
     state::BlockInfo block_info;
     std::vector<state::Transaction> transactions;
+    bool valid = true;
 
     BlockHeader expected_block_header;
 };

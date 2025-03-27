@@ -17,6 +17,8 @@ add_library(evmone
     baseline_instruction_table.cpp
     baseline_instruction_table.hpp
     constants.hpp
+    delegation.cpp
+    delegation.hpp
     eof.cpp
     eof.hpp
     instructions.hpp
@@ -31,7 +33,7 @@ add_library(evmone
     vm.hpp
 )
 target_compile_features(evmone PUBLIC cxx_std_20)
-target_link_libraries(evmone PUBLIC evmc::evmc intx::intx PRIVATE ethash::keccak)
+target_link_libraries(evmone PUBLIC evmc::evmc intx::intx evmmax PRIVATE ethash::keccak)
 target_include_directories(evmone PUBLIC
     $<BUILD_INTERFACE:${include_dir}>$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
@@ -46,7 +48,7 @@ if(CABLE_COMPILER_GNULIKE)
     target_compile_options(
         evmone PRIVATE
         -fno-exceptions
-        $<$<CXX_COMPILER_ID:GNU>:-Wstack-usage=2900>
+        $<$<CXX_COMPILER_ID:GNU>:-Wstack-usage=2950>
     )
     if(NOT SANITIZE MATCHES undefined)
         # RTTI can be disabled except for UBSan which checks vptr integrity.

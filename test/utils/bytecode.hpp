@@ -343,6 +343,12 @@ inline bytecode rjumpi(int16_t offset, bytecode condition)
     return condition + (OP_RJUMPI + big_endian(offset));
 }
 
+inline bytecode rjumpi(bytecode body, bytecode condition)
+{
+    assert(body.size() < std::numeric_limits<int16_t>::max());
+    return condition + (OP_RJUMPI + big_endian(static_cast<int16_t>(body.size())));
+}
+
 inline bytecode rjumpv(const std::initializer_list<int16_t> offsets, bytecode condition)
 {
     assert(offsets.size() > 0);
@@ -355,6 +361,42 @@ inline bytecode rjumpv(const std::initializer_list<int16_t> offsets, bytecode co
 inline bytecode dataloadn(uint16_t index)
 {
     return OP_DATALOADN + big_endian(index);
+}
+
+inline bytecode lt(bytecode lhs, bytecode rhs)
+{
+    return lhs + rhs + OP_LT;
+}
+
+inline bytecode gt(bytecode lhs, bytecode rhs)
+{
+    return lhs + rhs + OP_GT;
+}
+
+inline bytecode or_(bytecode lhs, bytecode rhs)
+{
+    return lhs + rhs + OP_OR;
+}
+
+inline bytecode mod_(bytecode num, bytecode den)
+{
+    return num + den + OP_MOD;
+}
+
+inline bytecode div(bytecode num, bytecode den)
+{
+    return num + den + OP_DIV;
+}
+
+inline bytecode for_(bytecode init, bytecode iter, bytecode condition, bytecode body)
+{
+    bytecode ret;
+    ret += init;
+    const auto loob_beg_pos = ret.size();
+    ret += rjumpi(body, condition) + iter;
+    ret += rjump(static_cast<int16_t>(-(ret.size() - loob_beg_pos)));
+
+    return ret;
 }
 
 inline bytecode callf(uint16_t target)
@@ -466,6 +508,64 @@ inline bytecode blockhash(bytecode number)
 inline bytecode blobhash(bytecode index)
 {
     return index + OP_BLOBHASH;
+}
+
+inline bytecode setmodx(bytecode num_val_slots, bytecode mod_size, bytecode mod_offset)
+{
+    return num_val_slots + mod_size + mod_offset + OP_SETUPX;
+}
+
+inline bytecode storex(bytecode num_vals, bytecode val_offset, bytecode val_slot)
+{
+    return num_vals + val_offset + val_slot + OP_STOREX;
+}
+
+inline bytecode loadx(bytecode num_vals, bytecode val_idx, bytecode mem_offset)
+{
+    return num_vals + val_idx + mem_offset + OP_LOADX;
+}
+
+inline bytecode addmodx(uint8_t dst_idx, uint8_t dst_stride, uint8_t x_idx, uint8_t x_stride,
+    uint8_t y_idx, uint8_t y_stride, uint8_t count)
+{
+    return hex(OP_ADDMODX) + hex(dst_idx) + hex(dst_stride) + hex(x_idx) + hex(x_stride) +
+           hex(y_idx) + hex(y_stride) + hex(count);
+}
+
+inline bytecode submodx(uint8_t dst_idx, uint8_t dst_stride, uint8_t x_idx, uint8_t x_stride,
+    uint8_t y_idx, uint8_t y_stride, uint8_t count)
+{
+    return hex(OP_SUBMODX) + hex(dst_idx) + hex(dst_stride) + hex(x_idx) + hex(x_stride) +
+           hex(y_idx) + hex(y_stride) + hex(count);
+}
+
+inline bytecode mulmodx(uint8_t dst_idx, uint8_t dst_stride, uint8_t x_idx, uint8_t x_stride,
+    uint8_t y_idx, uint8_t y_stride, uint8_t count)
+{
+    return hex(OP_MULMODX) + hex(dst_idx) + hex(dst_stride) + hex(x_idx) + hex(x_stride) +
+           hex(y_idx) + hex(y_stride) + hex(count);
+}
+
+inline bytecode invmodx(
+    uint8_t dst_idx, uint8_t dst_stride, uint8_t x_idx, uint8_t x_stride, uint8_t count)
+{
+    return hex(OP_INVMODX) + hex(dst_idx) + hex(dst_stride) + hex(x_idx) + hex(x_stride) +
+           hex(count);
+}
+
+inline bytecode addmodx(uint8_t dst_idx, uint8_t x_idx, uint8_t y_idx)
+{
+    return addmodx(dst_idx, 0, x_idx, 0, y_idx, 0, 1);
+}
+
+inline bytecode submodx(uint8_t dst_idx, uint8_t x_idx, uint8_t y_idx)
+{
+    return submodx(dst_idx, 0, x_idx, 0, y_idx, 0, 1);
+}
+
+inline bytecode mulmodx(uint8_t dst_idx, uint8_t x_idx, uint8_t y_idx)
+{
+    return mulmodx(dst_idx, 0, x_idx, 0, y_idx, 0, 1);
 }
 
 template <Opcode kind>
@@ -622,7 +722,7 @@ public:
     }
 
     template <Opcode k = kind>
-        requires(k == OP_CREATE2 || k == OP_EOFCREATE || k == OP_TXCREATE)
+        requires(k == OP_CREATE2 || k == OP_EOFCREATE)
     create_instruction& salt(bytecode salt)
     {
         m_salt = std::move(salt);
@@ -637,29 +737,18 @@ public:
         return *this;
     }
 
-    template <Opcode k = kind>
-        requires(k == OP_TXCREATE)
-    create_instruction& initcode(bytecode hash)
-    {
-        m_initcode_hash = std::move(hash);
-        return *this;
-    }
-
     operator bytecode() const
     {
         bytecode code;
         if constexpr (kind == OP_CREATE2)
             code += m_salt;
-        else if constexpr (kind == OP_EOFCREATE || kind == OP_TXCREATE)
+        else if constexpr (kind == OP_EOFCREATE)
             code += m_input_size + m_input + m_salt;
 
         if constexpr (kind == OP_CREATE || kind == OP_CREATE2)
             code += m_input_size + m_input;
 
         code += m_value;
-
-        if constexpr (kind == OP_TXCREATE)
-            code += m_initcode_hash;
 
         code += bytecode{kind};
         if constexpr (kind == OP_EOFCREATE)
@@ -681,11 +770,6 @@ inline auto create2()
 inline auto eofcreate()
 {
     return create_instruction<OP_EOFCREATE>{};
-}
-
-inline auto txcreate()
-{
-    return create_instruction<OP_TXCREATE>{};
 }
 
 inline std::string hex(Opcode opcode) noexcept

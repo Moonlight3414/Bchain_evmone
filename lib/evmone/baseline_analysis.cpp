@@ -44,7 +44,7 @@ std::unique_ptr<uint8_t[]> pad_code(bytes_view code)
     constexpr auto padding = 32 + 1;
 
     auto padded_code = std::make_unique_for_overwrite<uint8_t[]>(code.size() + padding);
-    std::copy(std::begin(code), std::end(code), padded_code.get());
+    std::ranges::copy(code, padded_code.get());
     std::fill_n(&padded_code[code.size()], padding, uint8_t{OP_STOP});
     return padded_code;
 }
@@ -68,14 +68,14 @@ CodeAnalysis analyze_eof1(bytes_view container)
     const auto executable_code =
         container.substr(code_sections_offset, code_sections_end - code_sections_offset);
 
-    return CodeAnalysis{executable_code, std::move(header)};
+    return CodeAnalysis{container, executable_code, std::move(header)};
 }
 }  // namespace
 
-CodeAnalysis analyze(evmc_revision rev, bytes_view code)
+CodeAnalysis analyze(bytes_view code, bool eof_enabled)
 {
-    if (rev < EVMC_PRAGUE || !is_eof_container(code))
-        return analyze_legacy(code);
-    return analyze_eof1(code);
+    if (eof_enabled && is_eof_container(code))
+        return analyze_eof1(code);
+    return analyze_legacy(code);
 }
 }  // namespace evmone::baseline

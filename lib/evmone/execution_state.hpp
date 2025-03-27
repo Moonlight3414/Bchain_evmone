@@ -4,6 +4,7 @@
 #pragma once
 
 #include <evmc/evmc.hpp>
+#include <evmmax/evmmax.hpp>
 #include <intx/intx.hpp>
 #include <memory>
 #include <string>
@@ -76,14 +77,19 @@ public:
 /// The EVM memory.
 ///
 /// The implementations uses initial allocation of 4k and then grows capacity with 2x factor.
-/// Some benchmarks has been done to confirm 4k is ok-ish value.
+/// Some benchmarks have been done to confirm 4k is ok-ish value.
 class Memory
 {
     /// The size of allocation "page".
     static constexpr size_t page_size = 4 * 1024;
 
-    /// Pointer to allocated memory.
-    uint8_t* m_data = nullptr;
+    struct FreeDeleter
+    {
+        void operator()(uint8_t* p) const noexcept { std::free(p); }
+    };
+
+    /// Owned pointer to allocated memory.
+    std::unique_ptr<uint8_t[], FreeDeleter> m_data;
 
     /// The "virtual" size of the memory.
     size_t m_size = 0;
@@ -95,8 +101,8 @@ class Memory
 
     void allocate_capacity() noexcept
     {
-        m_data = static_cast<uint8_t*>(std::realloc(m_data, m_capacity));
-        if (m_data == nullptr)
+        m_data.reset(static_cast<uint8_t*>(std::realloc(m_data.release(), m_capacity)));
+        if (!m_data) [[unlikely]]
             handle_out_of_memory();
     }
 
@@ -104,18 +110,12 @@ public:
     /// Creates Memory object with initial capacity allocation.
     Memory() noexcept { allocate_capacity(); }
 
-    /// Frees all allocated memory.
-    ~Memory() noexcept { std::free(m_data); }
-
-    Memory(const Memory&) = delete;
-    Memory& operator=(const Memory&) = delete;
-
     uint8_t& operator[](size_t index) noexcept { return m_data[index]; }
 
-    [[nodiscard]] const uint8_t* data() const noexcept { return m_data; }
+    [[nodiscard]] const uint8_t* data() const noexcept { return m_data.get(); }
     [[nodiscard]] size_t size() const noexcept { return m_size; }
 
-    /// Grows the memory to the given size. The extend is filled with zeros.
+    /// Grows the memory to the given size. The extent is filled with zeros.
     ///
     /// @param new_size  New memory size. Must be larger than the current size and multiple of 32.
     void grow(size_t new_size) noexcept
@@ -138,7 +138,7 @@ public:
 
             allocate_capacity();
         }
-        std::memset(m_data + m_size, 0, new_size - m_size);
+        std::memset(&m_data[m_size], 0, new_size - m_size);
         m_size = new_size;
     }
 
@@ -164,9 +164,6 @@ public:
     /// For EOF-formatted code this is a reference to entire container.
     bytes_view original_code;
 
-    /// Reference to the EOF data section. May be empty.
-    bytes_view data;
-
     evmc_status_code status = EVMC_SUCCESS;
     size_t output_offset = 0;
     size_t output_size = 0;
@@ -174,9 +171,10 @@ public:
     /// Container to be deployed returned from RETURNCONTRACT, used only inside EOFCREATE execution.
     std::optional<bytes> deploy_container;
 
+    evmmax::EVMMAXState evmmax_state;
+
 private:
     evmc_tx_context m_tx = {};
-    std::optional<std::unordered_map<evmc::bytes32, bytes_view>> m_initcodes;
 
 public:
     /// Pointer to code analysis.
@@ -197,19 +195,15 @@ public:
     ExecutionState() noexcept = default;
 
     ExecutionState(const evmc_message& message, evmc_revision revision,
-        const evmc_host_interface& host_interface, evmc_host_context* host_ctx, bytes_view _code,
-        bytes_view _data) noexcept
-      : msg{&message},
-        host{host_interface, host_ctx},
-        rev{revision},
-        original_code{_code},
-        data{_data}
+        const evmc_host_interface& host_interface, evmc_host_context* host_ctx,
+        bytes_view _code) noexcept
+      : msg{&message}, host{host_interface, host_ctx}, rev{revision}, original_code{_code}
     {}
 
     /// Resets the contents of the ExecutionState so that it could be reused.
     void reset(const evmc_message& message, evmc_revision revision,
-        const evmc_host_interface& host_interface, evmc_host_context* host_ctx, bytes_view _code,
-        bytes_view _data) noexcept
+        const evmc_host_interface& host_interface, evmc_host_context* host_ctx,
+        bytes_view _code) noexcept
     {
         gas_refund = 0;
         memory.clear();
@@ -218,11 +212,13 @@ public:
         rev = revision;
         return_data.clear();
         original_code = _code;
-        data = _data;
         status = EVMC_SUCCESS;
         output_offset = 0;
         output_size = 0;
+        deploy_container = {};
         m_tx = {};
+        call_stack = {};
+        evmmax_state.clear();
     }
 
     [[nodiscard]] bool in_static_mode() const { return (msg->flags & EVMC_STATIC) != 0; }
@@ -232,26 +228,6 @@ public:
         if (INTX_UNLIKELY(m_tx.block_timestamp == 0))
             m_tx = host.get_tx_context();
         return m_tx;
-    }
-
-    /// Get initcode by its hash from transaction initcodes.
-    ///
-    /// Returns empty bytes_view if no such initcode was found.
-    [[nodiscard]] bytes_view get_tx_initcode_by_hash(const evmc_bytes32& hash) noexcept
-    {
-        if (!m_initcodes.has_value())
-        {
-            m_initcodes.emplace();
-            const auto& tx_context = get_tx_context();
-            for (size_t i = 0; i < tx_context.initcodes_count; ++i)
-            {
-                const auto& initcode = tx_context.initcodes[i];
-                m_initcodes->insert({initcode.hash, {initcode.code, initcode.code_size}});
-            }
-        }
-
-        const auto it = m_initcodes->find(hash);
-        return it != m_initcodes->end() ? it->second : bytes_view{};
     }
 };
 }  // namespace evmone

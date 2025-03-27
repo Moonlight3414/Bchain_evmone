@@ -121,8 +121,28 @@ state::AccessList from_json<state::AccessList>(const json::json& j)
     return o;
 }
 
+template <>
+state::AuthorizationList from_json<state::AuthorizationList>(const json::json& j)
+{
+    state::AuthorizationList o;
+    for (const auto& a : j)
+    {
+        state::Authorization authorization{};
+        authorization.chain_id = from_json<uint256>(a.at("chainId"));
+        authorization.addr = from_json<address>(a.at("address"));
+        authorization.nonce = from_json<uint64_t>(a.at("nonce"));
+        if (a.contains("signer"))
+            authorization.signer = from_json<address>(a["signer"]);
+        authorization.r = from_json<uint256>(a.at("r"));
+        authorization.s = from_json<uint256>(a.at("s"));
+        authorization.v = from_json<uint256>(a.at("v"));
+        o.emplace_back(authorization);
+    }
+    return o;
+}
+
 // Based on calculateEIP1559BaseFee from ethereum/retesteth
-inline uint64_t calculate_current_base_fee_eip1559(
+static uint64_t calculate_current_base_fee_eip1559(
     uint64_t parent_gas_used, uint64_t parent_gas_limit, uint64_t parent_base_fee)
 {
     // TODO: Make sure that 64-bit precision is good enough.
@@ -167,8 +187,7 @@ state::Withdrawal from_json<state::Withdrawal>(const json::json& j)
         from_json<evmc::address>(j.at("address")), from_json<uint64_t>(j.at("amount"))};
 }
 
-template <>
-state::BlockInfo from_json<state::BlockInfo>(const json::json& j)
+state::BlockInfo from_json_with_rev(const json::json& j, evmc_revision rev)
 {
     evmc::bytes32 prev_randao;
     int64_t current_difficulty = 0;
@@ -212,13 +231,6 @@ state::BlockInfo from_json<state::BlockInfo>(const json::json& j)
             withdrawals.push_back(from_json<state::Withdrawal>(withdrawal));
     }
 
-    std::unordered_map<int64_t, hash256> block_hashes;
-    if (const auto block_hashes_it = j.find("blockHashes"); block_hashes_it != j.end())
-    {
-        for (const auto& [j_num, j_hash] : block_hashes_it->items())
-            block_hashes[from_json<int64_t>(j_num)] = from_json<hash256>(j_hash);
-    }
-
     std::vector<state::Ommer> ommers;
     if (const auto ommers_it = j.find("ommers"); ommers_it != j.end())
     {
@@ -239,10 +251,8 @@ state::BlockInfo from_json<state::BlockInfo>(const json::json& j)
     {
         const auto parent_excess_blob_gas = from_json<uint64_t>(*it);
         const auto parent_blob_gas_used = from_json<uint64_t>(j.at("parentBlobGasUsed"));
-        static constexpr uint64_t TARGET_BLOB_GAS_PER_BLOCK = 0x60000;
         excess_blob_gas =
-            std::max(parent_excess_blob_gas + parent_blob_gas_used, TARGET_BLOB_GAS_PER_BLOCK) -
-            TARGET_BLOB_GAS_PER_BLOCK;
+            state::calc_excess_blob_gas(rev, parent_blob_gas_used, parent_excess_blob_gas);
     }
     else if (const auto it2 = j.find("currentExcessBlobGas"); it2 != j.end())
     {
@@ -261,18 +271,31 @@ state::BlockInfo from_json<state::BlockInfo>(const json::json& j)
         .prev_randao = prev_randao,
         .parent_beacon_block_root = load_if_exists<hash256>(j, "parentBeaconBlockRoot"),
         .base_fee = base_fee,
+        .blob_gas_used = load_if_exists<uint64_t>(j, "blobGasUsed"),
         .excess_blob_gas = excess_blob_gas,
-        .blob_base_fee = state::compute_blob_gas_price(excess_blob_gas),
+        .blob_base_fee = state::compute_blob_gas_price(rev, excess_blob_gas),
         .ommers = std::move(ommers),
         .withdrawals = std::move(withdrawals),
-        .known_block_hashes = std::move(block_hashes),
     };
+}
+
+template <>
+TestBlockHashes from_json<TestBlockHashes>(const json::json& j)
+{
+    TestBlockHashes block_hashes;
+    if (const auto block_hashes_it = j.find("blockHashes"); block_hashes_it != j.end())
+    {
+        for (const auto& [j_num, j_hash] : block_hashes_it->items())
+            block_hashes[from_json<int64_t>(j_num)] = from_json<hash256>(j_hash);
+    }
+    return block_hashes;
 }
 
 template <>
 TestState from_json<TestState>(const json::json& j)
 {
     TestState o;
+    assert(j.is_object());
     for (const auto& [j_addr, j_acc] : j.items())
     {
         auto& acc =
@@ -295,8 +318,14 @@ TestState from_json<TestState>(const json::json& j)
 /// Load common parts of Transaction or TestMultiTransaction.
 static void from_json_tx_common(const json::json& j, state::Transaction& o)
 {
-    o.sender = from_json<evmc::address>(j.at("sender"));
+    // `sender` is not provided for transactions in invalid blocks.
+    o.sender = load_if_exists<evmc::address>(j, "sender");
     o.nonce = from_json<uint64_t>(j.at("nonce"));
+
+    if (const auto chain_id_it = j.find("chainId"); chain_id_it != j.end())
+        o.chain_id = from_json<uint8_t>(*chain_id_it);
+    else
+        o.chain_id = 1;
 
     if (const auto to_it = j.find("to"); to_it != j.end())
     {
@@ -331,11 +360,10 @@ static void from_json_tx_common(const json::json& j, state::Transaction& o)
         for (const auto& hash : *it)
             o.blob_hashes.push_back(from_json<bytes32>(hash));
     }
-    else if (const auto it_initcodes = j.find("initcodes"); it_initcodes != j.end())
+    else if (const auto au_it = j.find("authorizationList"); au_it != j.end())
     {
-        o.type = state::Transaction::Type::initcodes;
-        for (const auto& initcode : *it_initcodes)
-            o.initcodes.push_back(from_json<bytes>(initcode));
+        o.type = state::Transaction::Type::set_code;
+        o.authorization_list = from_json<state::AuthorizationList>(*au_it);
     }
 }
 
@@ -344,8 +372,6 @@ state::Transaction from_json<state::Transaction>(const json::json& j)
 {
     state::Transaction o;
     from_json_tx_common(j, o);
-    if (const auto chain_id_it = j.find("chainId"); chain_id_it != j.end())
-        o.chain_id = from_json<uint8_t>(*chain_id_it);
 
     if (const auto it = j.find("data"); it != j.end())
         o.data = from_json<bytes>(*it);
@@ -426,22 +452,28 @@ static void from_json(const json::json& j_t, StateTransitionTest& o)
 
     o.multi_tx = j_t.at("transaction").get<TestMultiTransaction>();
 
-    o.block = from_json<state::BlockInfo>(j_t.at("env"));
+    o.block_hashes = from_json<TestBlockHashes>(j_t.at("env"));
 
     if (const auto info_it = j_t.find("_info"); info_it != j_t.end())
     {
+        // Parse input labels to improve test readability.
+        // EEST don't use labels so exclude this code from coverage
+        // to help with ethereum/tests -> EEST conversion.
+        // LCOV_EXCL_START
         if (const auto labels_it = info_it->find("labels"); labels_it != info_it->end())
         {
             for (const auto& [j_id, j_label] : labels_it->items())
                 o.input_labels.emplace(from_json<uint64_t>(j_id), j_label);
         }
+        // LCOV_EXCL_STOP
     }
 
     for (const auto& [rev_name, expectations] : j_t.at("post").items())
     {
         // TODO(c++20): Use emplace_back with aggregate initialization.
         o.cases.push_back({to_rev(rev_name),
-            expectations.get<std::vector<StateTransitionTest::Case::Expectation>>()});
+            expectations.get<std::vector<StateTransitionTest::Case::Expectation>>(),
+            from_json_with_rev(j_t.at("env"), to_rev(rev_name))});
     }
 }
 
@@ -468,7 +500,7 @@ void validate_state(const TestState& state, evmc_revision rev)
         //       https://github.com/ethereum/tests/issues/1331
         if (is_eof_container(acc.code))
         {
-            if (rev >= EVMC_PRAGUE)
+            if (rev >= EVMC_OSAKA)
             {
                 if (const auto result = validate_eof(rev, ContainerKind::runtime, acc.code);
                     result != EOFValidationError::success)

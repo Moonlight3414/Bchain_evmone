@@ -9,13 +9,14 @@ target_include_directories(evmone-state PRIVATE ${evmone_private_include_dir})
 target_sources(
     evmone-state PRIVATE
     account.hpp
+    block.hpp
+    block.cpp
     bloom_filter.hpp
     bloom_filter.cpp
     errors.hpp
     ethash_difficulty.hpp
     ethash_difficulty.cpp
     hash_utils.hpp
-    hash_utils.cpp
     host.hpp
     host.cpp
     mpt.hpp
@@ -27,11 +28,19 @@ target_sources(
     precompiles_internal.hpp
     precompiles_stubs.hpp
     precompiles_stubs.cpp
+    requests.hpp
+    requests.cpp
     rlp.hpp
     state.hpp
     state.cpp
+    state_diff.hpp
+    state_view.hpp
+    system_contracts.hpp
+    system_contracts.cpp
     test_state.hpp
     test_state.cpp
+    transaction.hpp
+    transaction.cpp
 )
 
 option(EVMONE_PRECOMPILES_SILKPRE "Enable precompiles support via silkpre library" OFF)

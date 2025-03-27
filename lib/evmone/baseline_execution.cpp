@@ -136,6 +136,13 @@ struct Position
 }
 
 [[release_inline]] inline code_iterator invoke(
+    code_iterator (*instr_fn)(StackTop, ExecutionState&, code_iterator, int64_t&) noexcept,
+    Position pos, int64_t& gas, ExecutionState& state) noexcept
+{
+    return instr_fn(pos.stack_top, state, pos.code_it, gas);
+}
+
+[[release_inline]] inline code_iterator invoke(
     TermResult (*instr_fn)(StackTop, int64_t, ExecutionState&) noexcept, Position pos, int64_t& gas,
     ExecutionState& state) noexcept
 {
@@ -287,29 +294,34 @@ TARGET_OP_UNDEFINED:
 #endif
 }  // namespace
 
-evmc_result execute(
-    const VM& vm, int64_t gas, ExecutionState& state, const CodeAnalysis& analysis) noexcept
+evmc_result execute(VM& vm, const evmc_host_interface& host, evmc_host_context* ctx,
+    evmc_revision rev, const evmc_message& msg, const CodeAnalysis& analysis) noexcept
 {
+    const auto code = analysis.executable_code();
+    const auto code_begin = code.data();
+    auto gas = msg.gas;
+
+    auto& state = vm.get_execution_state(static_cast<size_t>(msg.depth));
+    state.reset(msg, rev, host, ctx, analysis.raw_code());
+
     state.analysis.baseline = &analysis;  // Assign code analysis for instruction implementations.
 
-    const auto code = analysis.executable_code;
-
-    const auto& cost_table = get_baseline_cost_table(state.rev, analysis.eof_header.version);
+    const auto& cost_table = get_baseline_cost_table(state.rev, analysis.eof_header().version);
 
     auto* tracer = vm.get_tracer();
     if (INTX_UNLIKELY(tracer != nullptr))
     {
-        tracer->notify_execution_start(state.rev, *state.msg, analysis.executable_code);
-        gas = dispatch<true>(cost_table, state, gas, code.data(), tracer);
+        tracer->notify_execution_start(state.rev, *state.msg, code);
+        gas = dispatch<true>(cost_table, state, gas, code_begin, tracer);
     }
     else
     {
 #if EVMONE_CGOTO_SUPPORTED
         if (vm.cgoto)
-            gas = dispatch_cgoto(cost_table, state, gas, code.data());
+            gas = dispatch_cgoto(cost_table, state, gas, code_begin);
         else
 #endif
-            gas = dispatch<false>(cost_table, state, gas, code.data());
+            gas = dispatch<false>(cost_table, state, gas, code_begin);
     }
 
     const auto gas_left = (state.status == EVMC_SUCCESS || state.status == EVMC_REVERT) ? gas : 0;
@@ -335,11 +347,12 @@ evmc_result execute(evmc_vm* c_vm, const evmc_host_interface* host, evmc_host_co
 {
     auto vm = static_cast<VM*>(c_vm);
     const bytes_view container{code, code_size};
+    const auto eof_enabled = rev >= instr::REV_EOF1;
 
     // Since EOF validation recurses into subcontainers, it only makes sense to do for top level
     // message calls. The condition for `msg->kind` inside differentiates between creation tx code
     // (initcode) and already deployed code (runtime).
-    if (vm->validate_eof && rev >= EVMC_PRAGUE && is_eof_container(container) && msg->depth == 0)
+    if (vm->validate_eof && eof_enabled && is_eof_container(container) && msg->depth == 0)
     {
         const auto container_kind =
             (msg->kind == EVMC_EOFCREATE ? ContainerKind::initcode : ContainerKind::runtime);
@@ -347,9 +360,7 @@ evmc_result execute(evmc_vm* c_vm, const evmc_host_interface* host, evmc_host_co
             return evmc_make_result(EVMC_CONTRACT_VALIDATION_FAILURE, 0, 0, nullptr, 0);
     }
 
-    const auto code_analysis = analyze(rev, container);
-    const auto data = code_analysis.eof_header.get_data(container);
-    auto state = std::make_unique<ExecutionState>(*msg, rev, *host, ctx, container, data);
-    return execute(*vm, msg->gas, *state, code_analysis);
+    const auto code_analysis = analyze(container, eof_enabled);
+    return execute(*vm, *host, ctx, rev, *msg, code_analysis);
 }
 }  // namespace evmone::baseline

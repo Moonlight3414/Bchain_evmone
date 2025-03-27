@@ -3,8 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
-#include "../state/state.hpp"
+#include "../state/block.hpp"
+#include "../state/errors.hpp"
 #include "../state/test_state.hpp"
+#include "../state/transaction.hpp"
 #include <nlohmann/json.hpp>
 
 namespace json = nlohmann;
@@ -52,11 +54,12 @@ struct StateTransitionTest
 
         evmc_revision rev;
         std::vector<Expectation> expectations;
+        state::BlockInfo block;
     };
 
     std::string name;
     TestState pre_state;
-    state::BlockInfo block;
+    TestBlockHashes block_hashes;
     TestMultiTransaction multi_tx;
     std::vector<Case> cases;
     std::unordered_map<uint64_t, std::string> input_labels;
@@ -80,8 +83,10 @@ hash256 from_json<hash256>(const json::json& j);
 template <>
 bytes from_json<bytes>(const json::json& j);
 
+state::BlockInfo from_json_with_rev(const json::json& j, evmc_revision rev);
+
 template <>
-state::BlockInfo from_json<state::BlockInfo>(const json::json& j);
+TestBlockHashes from_json<TestBlockHashes>(const json::json& j);
 
 template <>
 state::Withdrawal from_json<state::Withdrawal>(const json::json& j);
@@ -94,6 +99,10 @@ state::Transaction from_json<state::Transaction>(const json::json& j);
 
 /// Exports the State (accounts) to JSON format (aka pre/post/alloc state).
 json::json to_json(const TestState& state);
+
+/// Returns the standardized error message for the transaction validation error.
+[[nodiscard]] std::string get_invalid_tx_message(state::ErrorCode errc) noexcept;
+
 
 std::vector<StateTransitionTest> load_state_tests(std::istream& input);
 
@@ -126,3 +135,13 @@ inline std::string hex0x(const bytes_view& v)
     return "0x" + evmc::hex(v);
 }
 }  // namespace evmone::test
+
+inline std::ostream& operator<<(std::ostream& out, const evmone::address& a)
+{
+    return out << evmone::test::hex0x(a);
+}
+
+inline std::ostream& operator<<(std::ostream& out, const evmone::bytes32& b)
+{
+    return out << evmone::test::hex0x(b);
+}

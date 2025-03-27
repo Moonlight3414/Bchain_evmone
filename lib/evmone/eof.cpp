@@ -14,7 +14,6 @@
 #include <cassert>
 #include <limits>
 #include <numeric>
-#include <ostream>
 #include <queue>
 #include <unordered_set>
 #include <vector>
@@ -23,8 +22,6 @@ namespace evmone
 {
 namespace
 {
-constexpr uint8_t MAGIC_BYTES[] = {0xef, 0x00};
-constexpr bytes_view MAGIC{MAGIC_BYTES, std::size(MAGIC_BYTES)};
 constexpr uint8_t TERMINATOR = 0x00;
 constexpr uint8_t TYPE_SECTION = 0x01;
 constexpr uint8_t CODE_SECTION = 0x02;
@@ -50,7 +47,7 @@ size_t eof_header_size(const EOFSectionHeaders& headers) noexcept
     constexpr auto non_code_section_header_size = 3;  // (SECTION_ID + SIZE) per each section
     constexpr auto section_size_size = 2;
 
-    auto header_size = std::size(MAGIC) + 1 +  // 1 version byte
+    auto header_size = std::size(EOF_MAGIC) + 1 +  // 1 version byte
                        non_code_section_count * non_code_section_header_size +
                        sizeof(CODE_SECTION) + 2 + code_section_count * section_size_size +
                        sizeof(TERMINATOR);
@@ -93,7 +90,7 @@ std::variant<EOFSectionHeaders, EOFValidationError> validate_section_headers(byt
     uint16_t section_num = 0;
     EOFSectionHeaders section_headers{};
     const auto container_end = container.end();
-    auto it = container.begin() + std::size(MAGIC) + 1;  // MAGIC + VERSION
+    auto it = container.begin() + std::size(EOF_MAGIC) + 1;  // MAGIC + VERSION
     uint8_t expected_section_id = TYPE_SECTION;
     while (it != container_end && state != State::terminated)
     {
@@ -103,10 +100,11 @@ std::variant<EOFSectionHeaders, EOFValidationError> validate_section_headers(byt
         {
             section_id = *it++;
 
-            // If DATA_SECTION is expected, CONTAINER_SECTION is also allowed, because
-            // container section is optional.
-            if (section_id != expected_section_id &&
-                (expected_section_id != DATA_SECTION || section_id != CONTAINER_SECTION))
+            // Skip optional sections.
+            if (section_id != expected_section_id && expected_section_id == CONTAINER_SECTION)
+                expected_section_id = DATA_SECTION;
+
+            if (section_id != expected_section_id)
                 return get_section_missing_error(expected_section_id);
 
             switch (section_id)
@@ -128,7 +126,7 @@ std::variant<EOFSectionHeaders, EOFValidationError> validate_section_headers(byt
                     return EOFValidationError::zero_section_size;
                 if (section_num > CODE_SECTION_NUMBER_LIMIT)
                     return EOFValidationError::too_many_code_sections;
-                expected_section_id = DATA_SECTION;
+                expected_section_id = CONTAINER_SECTION;
                 state = State::section_size;
                 break;
             }
@@ -207,43 +205,28 @@ std::variant<EOFSectionHeaders, EOFValidationError> validate_section_headers(byt
     if (remaining_container_size < section_bodies_without_data)
         return EOFValidationError::invalid_section_bodies_size;
 
-    if (section_headers[TYPE_SECTION][0] != section_headers[CODE_SECTION].size() * 4)
-        return EOFValidationError::invalid_type_section_size;
-
     return section_headers;
 }
 
-std::variant<std::vector<EOFCodeType>, EOFValidationError> validate_types(
-    bytes_view container, size_t header_size, uint16_t type_section_size) noexcept
+EOFValidationError validate_types(bytes_view container, const EOF1Header& header) noexcept
 {
-    assert(!container.empty());  // guaranteed by EOF headers validation
-
-    std::vector<EOFCodeType> types;
-
-    // guaranteed by EOF headers validation
-    assert(header_size + type_section_size < container.size());
-
-    for (auto offset = header_size; offset < header_size + type_section_size; offset += 4)
+    for (size_t i = 0; i < header.get_type_count(); ++i)
     {
-        types.emplace_back(
-            container[offset], container[offset + 1], read_uint16_be(&container[offset + 2]));
-    }
+        const auto [inputs, outputs, max_stack_height] = header.get_type(container, i);
 
-    // check 1st section is (0, 0x80)
-    if (types[0].inputs != 0 || types[0].outputs != NON_RETURNING_FUNCTION)
-        return EOFValidationError::invalid_first_section_type;
+        // First type should be (0, 0x80)
+        if (i == 0 && (inputs != 0 || outputs != NON_RETURNING_FUNCTION))
+            return EOFValidationError::invalid_first_section_type;
 
-    for (const auto& t : types)
-    {
-        if ((t.outputs > OUTPUTS_INPUTS_NUMBER_LIMIT && t.outputs != NON_RETURNING_FUNCTION) ||
-            t.inputs > OUTPUTS_INPUTS_NUMBER_LIMIT)
+        if ((outputs > OUTPUTS_INPUTS_NUMBER_LIMIT && outputs != NON_RETURNING_FUNCTION) ||
+            inputs > OUTPUTS_INPUTS_NUMBER_LIMIT)
             return EOFValidationError::inputs_outputs_num_above_limit;
 
-        if (t.max_stack_height > MAX_STACK_HEIGHT)
+        if (max_stack_height > MAX_STACK_HEIGHT)
             return EOFValidationError::max_stack_height_above_limit;
     }
 
-    return types;
+    return EOFValidationError::success;
 }
 
 /// Result of validating instructions in a code section.
@@ -288,9 +271,11 @@ std::variant<InstructionValidationResult, EOFValidationError> validate_instructi
         else if (op == OP_CALLF)
         {
             const auto fid = read_uint16_be(&code[i + 1]);
-            if (fid >= header.types.size())
+            if (fid >= header.code_sizes.size())
                 return EOFValidationError::invalid_code_section_index;
-            if (header.types[fid].outputs == NON_RETURNING_FUNCTION)
+
+            const auto type = header.get_type(container, fid);
+            if (type.outputs == NON_RETURNING_FUNCTION)
                 return EOFValidationError::callf_to_non_returning_function;
             if (code_idx != fid)
                 accessed_code_sections.insert(fid);
@@ -304,10 +289,12 @@ std::variant<InstructionValidationResult, EOFValidationError> validate_instructi
         else if (op == OP_JUMPF)
         {
             const auto fid = read_uint16_be(&code[i + 1]);
-            if (fid >= header.types.size())
+            if (fid >= header.code_sizes.size())
                 return EOFValidationError::invalid_code_section_index;
+
+            const auto type = header.get_type(container, fid);
             // JUMPF into returning function means current function is returning.
-            if (header.types[fid].outputs != NON_RETURNING_FUNCTION)
+            if (type.outputs != NON_RETURNING_FUNCTION)
                 is_returning = true;
             if (code_idx != fid)
                 accessed_code_sections.insert(fid);
@@ -344,14 +331,16 @@ std::variant<InstructionValidationResult, EOFValidationError> validate_instructi
             i += instr::traits[op].immediate_size;
     }
 
-    const auto declared_returning = (header.types[code_idx].outputs != NON_RETURNING_FUNCTION);
+    const auto declared_returning =
+        header.get_type(container, code_idx).outputs != NON_RETURNING_FUNCTION;
     if (is_returning != declared_returning)
         return EOFValidationError::invalid_non_returning_flag;
 
-    return InstructionValidationResult{subcontainer_references, accessed_code_sections};
+    return InstructionValidationResult{
+        std::move(subcontainer_references), std::move(accessed_code_sections)};
 }
 
-/// Validates that that we don't rjump inside an instruction's immediate.
+/// Validates that we don't rjump inside an instruction's immediate.
 /// Requires that the input is validated against truncation.
 bool validate_rjump_destinations(bytes_view code) noexcept
 {
@@ -411,7 +400,7 @@ bool validate_rjump_destinations(bytes_view code) noexcept
 
 /// Requires that the input is validated against truncation.
 std::variant<EOFValidationError, int32_t> validate_max_stack_height(
-    bytes_view code, size_t func_index, const std::vector<EOFCodeType>& code_types)
+    bytes_view code, size_t func_index, const EOF1Header& header, bytes_view container)
 {
     // Special value used for detecting errors.
     static constexpr int32_t LOC_UNVISITED = -1;  // Unvisited byte.
@@ -428,8 +417,9 @@ std::variant<EOFValidationError, int32_t> validate_max_stack_height(
 
     assert(!code.empty());
 
+    const auto type = header.get_type(container, func_index);
     std::vector<StackHeightRange> stack_heights(code.size());
-    stack_heights[0] = {code_types[func_index].inputs, code_types[func_index].inputs};
+    stack_heights[0] = {type.inputs, type.inputs};
 
     for (size_t i = 0; i < code.size();)
     {
@@ -449,37 +439,36 @@ std::variant<EOFValidationError, int32_t> validate_max_stack_height(
         if (opcode == OP_CALLF)
         {
             const auto fid = read_uint16_be(&code[i + 1]);
+            const auto callee_type = header.get_type(container, fid);
+            stack_height_required = callee_type.inputs;
 
-            stack_height_required = code_types[fid].inputs;
-
-            if (stack_height.max + code_types[fid].max_stack_height - stack_height_required >
+            if (stack_height.max + callee_type.max_stack_height - stack_height_required >
                 STACK_SIZE_LIMIT)
                 return EOFValidationError::stack_overflow;
 
             // Instruction validation ensures target function is returning
-            assert(code_types[fid].outputs != NON_RETURNING_FUNCTION);
-            stack_height_change =
-                static_cast<int8_t>(code_types[fid].outputs - stack_height_required);
+            assert(callee_type.outputs != NON_RETURNING_FUNCTION);
+            stack_height_change = static_cast<int8_t>(callee_type.outputs - stack_height_required);
         }
         else if (opcode == OP_JUMPF)
         {
             const auto fid = read_uint16_be(&code[i + 1]);
+            const auto callee_type = header.get_type(container, fid);
 
-            if (stack_height.max + code_types[fid].max_stack_height - code_types[fid].inputs >
+            if (stack_height.max + callee_type.max_stack_height - callee_type.inputs >
                 STACK_SIZE_LIMIT)
                 return EOFValidationError::stack_overflow;
 
-            if (code_types[fid].outputs == NON_RETURNING_FUNCTION)
+            if (callee_type.outputs == NON_RETURNING_FUNCTION)
             {
-                stack_height_required = code_types[fid].inputs;
+                stack_height_required = callee_type.inputs;
             }
             else
             {
-                if (code_types[func_index].outputs < code_types[fid].outputs)
+                if (type.outputs < callee_type.outputs)
                     return EOFValidationError::jumpf_destination_incompatible_outputs;
 
-                stack_height_required = code_types[func_index].outputs + code_types[fid].inputs -
-                                        code_types[fid].outputs;
+                stack_height_required = type.outputs + callee_type.inputs - callee_type.outputs;
 
                 // JUMPF to returning function requires exact number of stack items
                 // and is allowed only in constant stack segment.
@@ -489,7 +478,7 @@ std::variant<EOFValidationError, int32_t> validate_max_stack_height(
         }
         else if (opcode == OP_RETF)
         {
-            stack_height_required = code_types[func_index].outputs;
+            stack_height_required = type.outputs;
             // RETF allowed only in constant stack segment
             if (stack_height.max > stack_height_required)
                 return EOFValidationError::stack_higher_than_outputs_required;
@@ -581,7 +570,7 @@ std::variant<EOFValidationError, int32_t> validate_max_stack_height(
         i = next;
     }
 
-    const auto max_stack_height_it = std::max_element(stack_heights.begin(), stack_heights.end(),
+    const auto max_stack_height_it = std::ranges::max_element(stack_heights,
         [](StackHeightRange lhs, StackHeightRange rhs) noexcept { return lhs.max < rhs.max; });
     return max_stack_height_it->max;
 }
@@ -616,6 +605,9 @@ EOFValidationError validate_eof1(
 
         if (container.size() > static_cast<size_t>(header.data_offset) + header.data_size)
             return EOFValidationError::invalid_section_bodies_size;
+
+        if (const auto err = validate_types(container, header); err != EOFValidationError::success)
+            return err;
 
         // Validate code sections
         std::vector<bool> visited_code_sections(header.code_sizes.size());
@@ -666,15 +658,18 @@ EOFValidationError validate_eof1(
 
             // Validate stack
             auto msh_or_error = validate_max_stack_height(
-                header.get_code(container, code_idx), code_idx, header.types);
+                header.get_code(container, code_idx), code_idx, header, container);
             if (const auto* error = std::get_if<EOFValidationError>(&msh_or_error))
                 return *error;
-            if (std::get<int32_t>(msh_or_error) != header.types[code_idx].max_stack_height)
+            // TODO(clang-tidy): Too restrictive, see
+            //   https://github.com/llvm/llvm-project/issues/120867.
+            // NOLINTNEXTLINE(modernize-use-integer-sign-comparison)
+            if (std::get<int32_t>(msh_or_error) !=
+                header.get_type(container, code_idx).max_stack_height)
                 return EOFValidationError::invalid_max_stack_height;
         }
 
-        if (std::find(visited_code_sections.begin(), visited_code_sections.end(), false) !=
-            visited_code_sections.end())
+        if (std::ranges::find(visited_code_sections, false) != visited_code_sections.end())
             return EOFValidationError::unreachable_code_sections;
 
         // Check if truncated data section is allowed.
@@ -718,7 +713,7 @@ size_t EOF1Header::data_size_position() const noexcept
 {
     const auto num_code_sections = code_sizes.size();
     const auto num_container_sections = container_sizes.size();
-    return std::size(MAGIC) + 1 +       // magic + version
+    return std::size(EOF_MAGIC) + 1 +   // magic + version
            3 +                          // type section kind + size
            3 + 2 * num_code_sections +  // code sections kind + count + sizes
            // container sections kind + count + sizes
@@ -728,7 +723,7 @@ size_t EOF1Header::data_size_position() const noexcept
 
 bool is_eof_container(bytes_view container) noexcept
 {
-    return container.starts_with(MAGIC);
+    return container.starts_with(EOF_MAGIC);
 }
 
 std::variant<EOF1Header, EOFValidationError> validate_header(
@@ -741,7 +736,7 @@ std::variant<EOF1Header, EOFValidationError> validate_header(
     if (version != 1)
         return EOFValidationError::eof_version_unknown;
 
-    if (rev < EVMC_PRAGUE)
+    if (rev < EVMC_OSAKA)
         return EOFValidationError::eof_version_unknown;
 
     // `offset` variable handled below is known to not be greater than the container size, as
@@ -760,14 +755,13 @@ std::variant<EOF1Header, EOFValidationError> validate_header(
 
     const auto header_size = eof_header_size(section_headers);
 
-    const auto types_or_error =
-        validate_types(container, header_size, section_headers[TYPE_SECTION].front());
-    if (const auto* error = std::get_if<EOFValidationError>(&types_or_error))
-        return *error;
-    const auto& types = std::get<std::vector<EOFCodeType>>(types_or_error);
+    const auto type_section_offset = header_size;
+    const auto type_section_size = section_headers[TYPE_SECTION].front();
+
+    if (type_section_size != code_sizes.size() * EOF1Header::TYPE_ENTRY_SIZE)
+        return EOFValidationError::invalid_type_section_size;
 
     std::vector<uint16_t> code_offsets;
-    const auto type_section_size = section_headers[TYPE_SECTION][0];
     auto offset = header_size + type_section_size;
 
     for (const auto code_size : code_sizes)
@@ -791,13 +785,13 @@ std::variant<EOF1Header, EOFValidationError> validate_header(
 
     return EOF1Header{
         .version = container[2],
+        .type_section_offset = type_section_offset,
         .code_sizes = code_sizes,
         .code_offsets = code_offsets,
         .data_size = data_size,
         .data_offset = data_offset,
         .container_sizes = container_sizes,
         .container_offsets = container_offsets,
-        .types = types,
     };
 }
 
@@ -805,7 +799,7 @@ std::variant<EOF1Header, EOFValidationError> validate_header(
 EOF1Header read_valid_eof1_header(bytes_view container)
 {
     EOFSectionHeaders section_headers;
-    auto it = container.begin() + std::size(MAGIC) + 1;  // MAGIC + VERSION
+    auto it = container.begin() + std::size(EOF_MAGIC) + 1;  // MAGIC + VERSION
     while (*it != TERMINATOR)
     {
         const auto section_id = *it++;
@@ -830,15 +824,8 @@ EOF1Header read_valid_eof1_header(bytes_view container)
     const auto header_size = eof_header_size(section_headers);
 
     EOF1Header header;
-
     header.version = container[2];
-
-    for (auto type_offset = header_size;
-         type_offset < header_size + section_headers[TYPE_SECTION][0]; type_offset += 4)
-    {
-        header.types.emplace_back(container[type_offset], container[type_offset + 1],
-            read_uint16_be(&container[type_offset + 2]));
-    }
+    header.type_section_offset = header_size;
 
     header.code_sizes = section_headers[CODE_SECTION];
     auto code_offset = header_size + section_headers[TYPE_SECTION][0];

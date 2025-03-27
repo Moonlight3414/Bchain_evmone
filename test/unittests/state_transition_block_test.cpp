@@ -19,9 +19,10 @@ TEST_F(state_transition, block_apply_withdrawal)
 
 TEST_F(state_transition, known_block_hash)
 {
-    block.known_block_hashes = {
+    block_hashes = {
         {1, 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421_bytes32},
-        {2, 0x0000000000000000000000000000000000000000000000000000000000000111_bytes32}};
+        {2, 0x0000000000000000000000000000000000000000000000000000000000000111_bytes32},
+    };
     block.number = 5;
 
     tx.to = To;
@@ -65,9 +66,15 @@ TEST_F(state_transition, eip7516_blob_base_fee)
 {
     rev = EVMC_CANCUN;
 
-    block.blob_base_fee = 0xabcd;
+    block.excess_blob_gas = 0xabcd00;
+    // 0x1d is the result of ref implementation in EIP-4844
+    static constexpr auto price = 0x1d;
+    block.blob_base_fee = price;
+    assert(
+        state::compute_blob_gas_price(EVMC_CANCUN, *block.excess_blob_gas) == *block.blob_base_fee);
+
     tx.to = To;
     pre.insert(*tx.to, {.code = sstore(0x4a, OP_BLOBBASEFEE)});
 
-    expect.post[To].storage[0x4a_bytes32] = 0xabcd_bytes32;
+    expect.post[To].storage[0x4a_bytes32] = bytes32(price);
 }

@@ -3,16 +3,25 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "state_view.hpp"
 #include <evmc/evmc.hpp>
 #include <intx/intx.hpp>
 #include <map>
+#include <span>
+#include <variant>
 
 namespace evmone
 {
 namespace state
 {
-class State;
-}
+struct BlockInfo;
+struct Ommer;
+struct Requests;
+struct StateDiff;
+struct Transaction;
+struct TransactionReceipt;
+struct Withdrawal;
+}  // namespace state
 
 namespace test
 {
@@ -37,10 +46,14 @@ struct TestAccount
 /// This is a simplified variant of state::State:
 /// it hides some details related to transaction execution (e.g. original storage values)
 /// and is also easier to work with in tests.
-class TestState : public std::map<address, TestAccount>
+class TestState : public state::StateView, public std::map<address, TestAccount>
 {
 public:
     using map::map;
+
+    std::optional<Account> get_account(const address& addr) const noexcept override;
+    bytes get_account_code(const address& addr) const noexcept override;
+    bytes32 get_storage(const address& addr, const bytes32& key) const noexcept override;
 
     /// Inserts new account to the state.
     ///
@@ -56,12 +69,35 @@ public:
     /// TODO: deprecate this method.
     TestAccount& get(const address& addr) { return (*this)[addr]; }
 
-    /// Converts the intra state to TestState.
-    explicit TestState(const state::State& intra_state);
-
-    /// Converts the TestState to intra state for transaction execution.
-    [[nodiscard]] state::State to_intra_state() const;
+    /// Apply the state changes.
+    void apply(const state::StateDiff& diff);
 };
 
+class TestBlockHashes : public state::BlockHashes, public std::unordered_map<int64_t, bytes32>
+{
+public:
+    using std::unordered_map<int64_t, bytes32>::unordered_map;
+
+    bytes32 get_block_hash(int64_t block_number) const noexcept override;
+};
+
+/// Wrapping of state::transition() which operates on TestState.
+[[nodiscard]] std::variant<state::TransactionReceipt, std::error_code> transition(TestState& state,
+    const state::BlockInfo& block, const state::BlockHashes& block_hashes,
+    const state::Transaction& tx, evmc_revision rev, evmc::VM& vm, int64_t block_gas_left,
+    int64_t blob_gas_left);
+
+/// Wrapping of state::finalize() which operates on TestState.
+void finalize(TestState& state, evmc_revision rev, const address& coinbase,
+    std::optional<uint64_t> block_reward, std::span<const state::Ommer> ommers,
+    std::span<const state::Withdrawal> withdrawals);
+
+/// Wrapping of state::system_call_block_start() which operates on TestState.
+void system_call_block_start(TestState& state, const state::BlockInfo& block,
+    const state::BlockHashes& block_hashes, evmc_revision rev, evmc::VM& vm);
+
+/// Wrapping of state::system_call_block_end() which operates on TestState.
+std::vector<state::Requests> system_call_block_end(TestState& state, const state::BlockInfo& block,
+    const state::BlockHashes& block_hashes, evmc_revision rev, evmc::VM& vm);
 }  // namespace test
 }  // namespace evmone

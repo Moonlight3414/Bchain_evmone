@@ -2,6 +2,7 @@
 // Copyright 2019 The evmone Authors.
 // SPDX-License-Identifier: Apache-2.0
 
+#include "delegation.hpp"
 #include "eof.hpp"
 #include "instructions.hpp"
 
@@ -16,7 +17,36 @@ constexpr auto EXTCALL_ABORT = 2;
 
 namespace evmone::instr::core
 {
+namespace
+{
+/// Get target address of a code executing instruction.
+///
+/// Returns EIP-7702 delegate address if addr is delegated, or addr itself otherwise.
+/// Applies gas charge for accessing delegate account and may fail with out of gas.
+inline std::variant<evmc::address, Result> get_target_address(
+    const evmc::address& addr, int64_t& gas_left, ExecutionState& state) noexcept
+{
+    if (state.rev < EVMC_PRAGUE)
+        return addr;
+
+    const auto delegate_addr = get_delegate_address(state.host, addr);
+    if (!delegate_addr)
+        return addr;
+
+    const auto delegate_account_access_cost =
+        (state.host.access_account(*delegate_addr) == EVMC_ACCESS_COLD ?
+                instr::cold_account_access_cost :
+                instr::warm_storage_read_cost);
+
+    if ((gas_left -= delegate_account_access_cost) < 0)
+        return Result{EVMC_OUT_OF_GAS, gas_left};
+
+    return *delegate_addr;
+}
+}  // namespace
+
 /// Converts an opcode to matching EVMC call kind.
+/// NOLINTNEXTLINE(misc-use-internal-linkage) fixed in clang-tidy 20.
 consteval evmc_call_kind to_call_kind(Opcode op) noexcept
 {
     switch (op)
@@ -36,7 +66,6 @@ consteval evmc_call_kind to_call_kind(Opcode op) noexcept
     case OP_CREATE2:
         return EVMC_CREATE2;
     case OP_EOFCREATE:
-    case OP_TXCREATE:
         return EVMC_EOFCREATE;
     default:
         intx::unreachable();
@@ -67,6 +96,12 @@ Result call_impl(StackTop stack, int64_t gas_left, ExecutionState& state) noexce
             return {EVMC_OUT_OF_GAS, gas_left};
     }
 
+    const auto target_addr_or_result = get_target_address(dst, gas_left, state);
+    if (const auto* result = std::get_if<Result>(&target_addr_or_result))
+        return *result;
+
+    const auto& code_addr = std::get<evmc::address>(target_addr_or_result);
+
     if (!check_memory(gas_left, state.memory, input_offset_u256, input_size_u256))
         return {EVMC_OUT_OF_GAS, gas_left};
 
@@ -80,9 +115,13 @@ Result call_impl(StackTop stack, int64_t gas_left, ExecutionState& state) noexce
 
     evmc_message msg{.kind = to_call_kind(Op)};
     msg.flags = (Op == OP_STATICCALL) ? uint32_t{EVMC_STATIC} : state.msg->flags;
+    if (dst != code_addr)
+        msg.flags |= EVMC_DELEGATED;
+    else
+        msg.flags &= ~std::underlying_type_t<evmc_flags>{EVMC_DELEGATED};
     msg.depth = state.msg->depth + 1;
     msg.recipient = (Op == OP_CALL || Op == OP_STATICCALL) ? dst : state.msg->recipient;
-    msg.code_address = dst;
+    msg.code_address = code_addr;
     msg.sender = (Op == OP_DELEGATECALL) ? state.msg->sender : state.msg->recipient;
     msg.value =
         (Op == OP_DELEGATECALL) ? state.msg->value : intx::be::store<evmc::uint256be>(value);
@@ -178,6 +217,12 @@ Result extcall_impl(StackTop stack, int64_t gas_left, ExecutionState& state) noe
             return {EVMC_OUT_OF_GAS, gas_left};
     }
 
+    const auto target_addr_or_result = get_target_address(dst, gas_left, state);
+    if (const auto* result = std::get_if<Result>(&target_addr_or_result))
+        return *result;
+
+    const auto& code_addr = std::get<evmc::address>(target_addr_or_result);
+
     if (!check_memory(gas_left, state.memory, input_offset_u256, input_size_u256))
         return {EVMC_OUT_OF_GAS, gas_left};
 
@@ -186,9 +231,13 @@ Result extcall_impl(StackTop stack, int64_t gas_left, ExecutionState& state) noe
 
     evmc_message msg{.kind = to_call_kind(Op)};
     msg.flags = (Op == OP_EXTSTATICCALL) ? uint32_t{EVMC_STATIC} : state.msg->flags;
+    if (dst != code_addr)
+        msg.flags |= EVMC_DELEGATED;
+    else
+        msg.flags &= ~std::underlying_type_t<evmc_flags>{EVMC_DELEGATED};
     msg.depth = state.msg->depth + 1;
     msg.recipient = (Op != OP_EXTDELEGATECALL) ? dst : state.msg->recipient;
-    msg.code_address = dst;
+    msg.code_address = code_addr;
     msg.sender = (Op == OP_EXTDELEGATECALL) ? state.msg->sender : state.msg->recipient;
     msg.value =
         (Op == OP_EXTDELEGATECALL) ? state.msg->value : intx::be::store<evmc::uint256be>(value);
@@ -309,7 +358,7 @@ Result create_impl(StackTop stack, int64_t gas_left, ExecutionState& state) noex
         msg.input_data = &state.memory[init_code_offset];
         msg.input_size = init_code_size;
 
-        if (state.rev >= EVMC_PRAGUE)
+        if (state.rev >= EVMC_OSAKA)
         {
             // EOF initcode is not allowed for legacy creation
             if (is_eof_container({msg.input_data, msg.input_size}))
@@ -332,17 +381,12 @@ Result create_impl(StackTop stack, int64_t gas_left, ExecutionState& state) noex
     return {EVMC_SUCCESS, gas_left};
 }
 
-template <Opcode Op>
-Result create_eof_impl(
+Result eofcreate(
     StackTop stack, int64_t gas_left, ExecutionState& state, code_iterator& pos) noexcept
 {
-    static_assert(Op == OP_EOFCREATE || Op == OP_TXCREATE);
-
     if (state.in_static_mode())
         return {EVMC_STATIC_MODE_VIOLATION, gas_left};
 
-    const auto initcode_hash =
-        (Op == OP_TXCREATE) ? intx::be::store<evmc::bytes32>(stack.pop()) : evmc::bytes32{};
     const auto endowment = stack.pop();
     const auto salt = stack.pop();
     const auto input_offset_u256 = stack.pop();
@@ -354,32 +398,11 @@ Result create_eof_impl(
     if (!check_memory(gas_left, state.memory, input_offset_u256, input_size_u256))
         return {EVMC_OUT_OF_GAS, gas_left};
 
-    bytes_view initcontainer;
-    if constexpr (Op == OP_EOFCREATE)
-    {
-        const auto initcontainer_index = pos[1];
-        pos += 2;
-        const auto& container = state.original_code;
-        const auto& eof_header = state.analysis.baseline->eof_header;
-        initcontainer = eof_header.get_container(container, initcontainer_index);
-    }
-    else
-    {
-        pos += 1;
-
-        initcontainer = state.get_tx_initcode_by_hash(initcode_hash);
-        // In case initcode was not found, empty bytes_view was returned.
-        // Transaction initcodes are not allowed to be empty.
-        if (initcontainer.empty())
-            return {EVMC_SUCCESS, gas_left};  // "Light" failure
-
-        // Charge for initcode validation.
-        constexpr auto initcode_word_cost_validation = 2;
-        const auto initcode_cost_validation =
-            num_words(initcontainer.size()) * initcode_word_cost_validation;
-        if ((gas_left -= initcode_cost_validation) < 0)
-            return {EVMC_OUT_OF_GAS, gas_left};
-    }
+    const auto initcontainer_index = pos[1];
+    pos += 2;
+    const auto& container = state.original_code;
+    const auto& eof_header = state.analysis.baseline->eof_header();
+    const auto initcontainer = eof_header.get_container(container, initcontainer_index);
 
     // Charge for initcode hashing.
     constexpr auto initcode_word_cost_hashing = 6;
@@ -397,14 +420,7 @@ Result create_eof_impl(
         intx::be::load<uint256>(state.host.get_balance(state.msg->recipient)) < endowment)
         return {EVMC_SUCCESS, gas_left};  // "Light" failure.
 
-    if constexpr (Op == OP_TXCREATE)
-    {
-        const auto error_subcont = validate_eof(state.rev, ContainerKind::initcode, initcontainer);
-        if (error_subcont != EOFValidationError::success)
-            return {EVMC_SUCCESS, gas_left};  // "Light" failure.
-    }
-
-    evmc_message msg{.kind = to_call_kind(Op)};
+    evmc_message msg{.kind = EVMC_EOFCREATE};
     msg.gas = gas_left - gas_left / 64;
     if (input_size > 0)
     {
@@ -436,8 +452,4 @@ template Result create_impl<OP_CREATE>(
     StackTop stack, int64_t gas_left, ExecutionState& state) noexcept;
 template Result create_impl<OP_CREATE2>(
     StackTop stack, int64_t gas_left, ExecutionState& state) noexcept;
-template Result create_eof_impl<OP_EOFCREATE>(
-    StackTop stack, int64_t gas_left, ExecutionState& state, code_iterator& pos) noexcept;
-template Result create_eof_impl<OP_TXCREATE>(
-    StackTop stack, int64_t gas_left, ExecutionState& state, code_iterator& pos) noexcept;
 }  // namespace evmone::instr::core

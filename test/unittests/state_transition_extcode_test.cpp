@@ -14,6 +14,7 @@ TEST_F(state_transition, extcodehash_existent)
     block.base_fee = 0;
 
     static constexpr auto EXT = 0xe4_address;
+    tx.type = Transaction::Type::legacy;
     tx.to = To;
     pre.insert(To, {.code = sstore(0, push(EXT) + OP_EXTCODEHASH)});
     pre.insert(EXT, {.code = bytecode{"1234"}});
@@ -28,6 +29,7 @@ TEST_F(state_transition, extcodesize_existent)
     block.base_fee = 0;
 
     static constexpr auto EXT = 0xe4_address;
+    tx.type = Transaction::Type::legacy;
     tx.to = To;
     pre.insert(To, {.code = sstore(0, push(EXT) + OP_EXTCODESIZE)});
     pre.insert(EXT, {.code = bytes(3, 0)});
@@ -42,7 +44,7 @@ TEST_F(state_transition, legacy_extcodesize_eof)
 {
     pre.insert(target, {.code = eof_bytecode("FE")});
 
-    rev = EVMC_PRAGUE;
+    rev = EVMC_OSAKA;
     tx.to = To;
     pre.insert(*tx.to, {
                            .code = bytecode(push(target) + sstore(1, OP_EXTCODESIZE)),
@@ -55,7 +57,7 @@ TEST_F(state_transition, legacy_extcodehash_eof)
 {
     pre.insert(target, {.code = eof_bytecode("FE")});
 
-    rev = EVMC_PRAGUE;
+    rev = EVMC_OSAKA;
     tx.to = To;
     pre.insert(*tx.to, {
                            .code = bytecode(push(target) + sstore(1, OP_EXTCODEHASH)),
@@ -70,7 +72,7 @@ TEST_F(state_transition, legacy_extcodecopy_eof)
         0x1111111111111111111111111111111111111111111111111111111111111111_bytes32;
     pre.insert(target, {.code = eof_bytecode("FE")});
 
-    rev = EVMC_PRAGUE;
+    rev = EVMC_OSAKA;
     tx.to = To;
     pre.insert(*tx.to, {
                            .code = bytecode(mstore(0, ones) + push(20) + push0() + push0() +

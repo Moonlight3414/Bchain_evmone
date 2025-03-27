@@ -67,6 +67,10 @@ constexpr void validate_traits_of() noexcept
         static_assert(tr.immediate_size == 1);
     else if constexpr (Op == OP_DATALOADN)
         static_assert(tr.immediate_size == 2);
+    else if constexpr (Op == OP_ADDMODX || Op == OP_SUBMODX || Op == OP_MULMODX)
+        static_assert(tr.immediate_size == 7);
+    else if constexpr (Op == OP_INVMODX)
+        static_assert(tr.immediate_size == 5);
     else
         static_assert(tr.immediate_size == 0);  // Including RJUMPV.
 
@@ -75,7 +79,12 @@ constexpr void validate_traits_of() noexcept
 
     // since
     constexpr auto expected_rev = get_revision_defined_in(Op);
-    static_assert(tr.since.has_value() ? *tr.since == expected_rev : expected_rev == unspecified);
+    constexpr auto since =
+        tr.since.has_value() ?
+            // NOLINTNEXTLINE(readability-avoid-nested-conditional-operator)
+            tr.eof_since.has_value() ? std::min(*tr.since, *tr.eof_since) : *tr.since :
+            tr.eof_since;
+    static_assert(since.has_value() ? *since == expected_rev : expected_rev == unspecified);
 }
 
 template <std::size_t... Ops>
@@ -110,6 +119,13 @@ constexpr bool instruction_only_in_evmone(evmc_revision rev, Opcode op) noexcept
 
     switch (op)
     {
+    case OP_SETUPX:
+    case OP_ADDMODX:
+    case OP_SUBMODX:
+    case OP_MULMODX:
+    case OP_INVMODX:
+    case OP_LOADX:
+    case OP_STOREX:
     case OP_BLOBHASH:
     case OP_BLOBBASEFEE:
     case OP_RJUMP:
@@ -133,7 +149,6 @@ constexpr bool instruction_only_in_evmone(evmc_revision rev, Opcode op) noexcept
     case OP_EXTDELEGATECALL:
     case OP_EXTSTATICCALL:
     case OP_EOFCREATE:
-    case OP_TXCREATE:
     case OP_RETURNCONTRACT:
         return true;
     default:

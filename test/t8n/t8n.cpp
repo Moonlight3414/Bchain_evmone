@@ -5,6 +5,7 @@
 #include "../state/errors.hpp"
 #include "../state/ethash_difficulty.hpp"
 #include "../state/mpt_hash.hpp"
+#include "../state/requests.hpp"
 #include "../state/rlp.hpp"
 #include "../statetest/statetest.hpp"
 #include "../utils/utils.hpp"
@@ -35,6 +36,7 @@ int main(int argc, const char* argv[])
     std::optional<uint64_t> block_reward;
     uint64_t chain_id = 0;
     bool trace = false;
+    bool pre_state_only = false;
 
     try
     {
@@ -64,30 +66,36 @@ int main(int argc, const char* argv[])
                 output_result_file = argv[i];
             else if (arg == "--output.alloc" && ++i < argc)
                 output_alloc_file = argv[i];
-            else if (arg == "--state.reward" && ++i < argc && argv[i] != "-1"sv)
-                block_reward = intx::from_string<uint64_t>(argv[i]);
             else if (arg == "--state.chainid" && ++i < argc)
                 chain_id = intx::from_string<uint64_t>(argv[i]);
             else if (arg == "--output.body" && ++i < argc)
                 output_body_file = argv[i];
             else if (arg == "--trace")
                 trace = true;
+            else if (arg == "--state.reward" && ++i < argc)
+            {
+                if (argv[i] == "-1"sv)  // Hack to compute the root hash of the pre-state.
+                    pre_state_only = true;
+                else
+                    block_reward = intx::from_string<uint64_t>(argv[i]);
+            }
         }
 
         state::BlockInfo block;
-        state::State state;
+        TestBlockHashes block_hashes;
+        TestState state;
 
         if (!alloc_file.empty())
         {
             const auto j = json::json::parse(std::ifstream{alloc_file}, nullptr, false);
-            const auto test_state = test::from_json<TestState>(j);
-            validate_state(test_state, rev);
-            state = test_state.to_intra_state();
+            state = from_json<TestState>(j);
+            validate_state(state, rev);
         }
         if (!env_file.empty())
         {
             const auto j = json::json::parse(std::ifstream{env_file});
-            block = test::from_json<state::BlockInfo>(j);
+            block = from_json_with_rev(j, rev);
+            block_hashes = from_json<TestBlockHashes>(j);
         }
 
         json::json j_result;
@@ -109,13 +117,15 @@ int main(int argc, const char* argv[])
                 block.prev_randao = intx::be::store<bytes32>(intx::uint256{current_difficulty});
         }
 
-        j_result["currentBaseFee"] = hex0x(block.base_fee);
+        if (rev >= EVMC_LONDON)
+            j_result["currentBaseFee"] = hex0x(block.base_fee);
 
         int64_t cumulative_gas_used = 0;
-        int64_t blob_gas_left = state::BlockInfo::MAX_BLOB_GAS_PER_BLOCK;
+        auto blob_gas_left = static_cast<int64_t>(state::max_blob_gas_per_block(rev));
         std::vector<state::Transaction> transactions;
         std::vector<state::TransactionReceipt> receipts;
         int64_t block_gas_left = block.gas_limit;
+        std::vector<state::Requests> requests;
 
         // Parse and execute transactions
         if (!txs_file.empty())
@@ -134,7 +144,8 @@ int main(int argc, const char* argv[])
                 j_result["receipts"] = json::json::array();
                 j_result["rejected"] = json::json::array();
 
-                state::system_call(state, block, rev, vm);
+                if (!pre_state_only)
+                    test::system_call_block_start(state, block, block_hashes, rev, vm);
 
                 for (size_t i = 0; i < j_txs.size(); ++i)
                 {
@@ -169,8 +180,8 @@ int main(int argc, const char* argv[])
                         std::clog.rdbuf(trace_file_output.rdbuf());
                     }
 
-                    auto res =
-                        state::transition(state, block, tx, rev, vm, block_gas_left, blob_gas_left);
+                    auto res = test::transition(
+                        state, block, block_hashes, tx, rev, vm, block_gas_left, blob_gas_left);
 
                     if (holds_alternative<std::error_code>(res))
                     {
@@ -195,7 +206,7 @@ int main(int argc, const char* argv[])
                         cumulative_gas_used += receipt.gas_used;
                         receipt.cumulative_gas_used = cumulative_gas_used;
                         if (rev < EVMC_BYZANTIUM)
-                            receipt.post_state = state::mpt_hash(TestState{state});
+                            receipt.post_state = state::mpt_hash(state);
                         j_receipt["cumulativeGasUsed"] = hex0x(cumulative_gas_used);
 
                         j_receipt["blockHash"] = hex0x(bytes32{});
@@ -205,7 +216,7 @@ int main(int argc, const char* argv[])
                         j_receipt["root"] = "";
                         j_receipt["status"] = "0x1";
                         j_receipt["transactionIndex"] = hex0x(i);
-                        blob_gas_left -= tx.blob_gas_used();
+                        blob_gas_left -= static_cast<int64_t>(tx.blob_gas_used());
                         transactions.emplace_back(std::move(tx));
                         block_gas_left -= receipt.gas_used;
                         receipts.emplace_back(std::move(receipt));
@@ -217,11 +228,20 @@ int main(int argc, const char* argv[])
                 }
             }
 
-            state::finalize(
+            if (!pre_state_only && rev >= EVMC_PRAGUE)
+            {
+                requests.emplace_back(collect_deposit_requests(receipts));
+
+                auto system_call_requests =
+                    system_call_block_end(state, block, block_hashes, rev, vm);
+                std::ranges::move(system_call_requests, std::back_inserter(requests));
+            }
+
+            test::finalize(
                 state, rev, block.coinbase, block_reward, block.ommers, block.withdrawals);
 
             j_result["logsHash"] = hex0x(logs_hash(txs_logs));
-            j_result["stateRoot"] = hex0x(state::mpt_hash(TestState{state}));
+            j_result["stateRoot"] = hex0x(state::mpt_hash(state));
         }
 
         j_result["logsBloom"] = hex0x(compute_bloom_filter(receipts));
@@ -234,8 +254,24 @@ int main(int argc, const char* argv[])
         if (rev >= EVMC_CANCUN)
         {
             j_result["blobGasUsed"] =
-                hex0x(state::BlockInfo::MAX_BLOB_GAS_PER_BLOCK - blob_gas_left);
-            j_result["currentExcessBlobGas"] = hex0x(block.excess_blob_gas);
+                hex0x(static_cast<int64_t>(state::max_blob_gas_per_block(rev)) - blob_gas_left);
+            if (block.excess_blob_gas.has_value())
+                j_result["currentExcessBlobGas"] = hex0x(*block.excess_blob_gas);
+        }
+        if (rev >= EVMC_PRAGUE)
+        {
+            // EIP-7685: General purpose execution layer requests
+            j_result["requests"] = json::json::array();
+            for (const auto& r : requests)
+            {
+                if (!r.data().empty())
+                    // Only report non-empty requests. Include the leading type byte.
+                    j_result["requests"].emplace_back(hex0x(r.raw_data));
+            }
+
+            auto requests_hash = calculate_requests_hash(requests);
+
+            j_result["requestsHash"] = hex0x(requests_hash);
         }
 
         std::ofstream{output_dir / output_result_file} << std::setw(2) << j_result;

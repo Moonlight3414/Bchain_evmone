@@ -4,7 +4,6 @@
 
 #include "host.hpp"
 #include "precompiles.hpp"
-#include "rlp.hpp"
 #include <evmone/constants.hpp>
 #include <evmone/eof.hpp>
 
@@ -18,10 +17,7 @@ bool Host::account_exists(const address& addr) const noexcept
 
 bytes32 Host::get_storage(const address& addr, const bytes32& key) const noexcept
 {
-    const auto& acc = m_state.get(addr);
-    if (const auto it = acc.storage.find(key); it != acc.storage.end())
-        return it->second.current;
-    return {};
+    return m_state.get_storage(addr, key).current;
 }
 
 evmc_storage_status Host::set_storage(
@@ -30,7 +26,7 @@ evmc_storage_status Host::set_storage(
     // Follow EVMC documentation https://evmc.ethereum.org/storagestatus.html#autotoc_md3
     // and EIP-2200 specification https://eips.ethereum.org/EIPS/eip-2200.
 
-    auto& storage_slot = m_state.get(addr).storage[key];
+    auto& storage_slot = m_state.get_storage(addr, key);
     const auto& [current, original, _] = storage_slot;
 
     const auto dirty = original != current;
@@ -92,37 +88,49 @@ bytes_view extcode(bytes_view code) noexcept
 /// as defined in the [EIP-7610](https://eips.ethereum.org/EIPS/eip-7610).
 [[nodiscard]] bool is_create_collision(const Account& acc) noexcept
 {
-    if (acc.nonce != 0 || !acc.code.empty())
+    // TODO: This requires much more testing:
+    // - what if an account had storage but is destructed?
+    // - what if an account had cold storage but it was emptied?
+    // - what if an account without cold storage gain one?
+    if (acc.nonce != 0)
+        return true;
+    if (acc.code_hash != Account::EMPTY_CODE_HASH)
+        return true;
+    if (acc.has_initial_storage)
         return true;
 
-    // acc.storage may have entries from access list, even if account storage is empty.
-    // Check for non-zero current values.
-    if (std::ranges::any_of(
-            acc.storage, [](auto& e) noexcept { return !is_zero(e.second.current); }))
-        return true;
-
+    // The hot storage is ignored because it can contain elements from access list.
+    // TODO: Is this correct for destructed accounts?
+    assert(!acc.destructed && "untested");
     return false;
 }
 }  // namespace
 
 size_t Host::get_code_size(const address& addr) const noexcept
 {
-    const auto* const acc = m_state.find(addr);
-    return (acc != nullptr) ? extcode(acc->code).size() : 0;
+    const auto raw_code = m_state.get_code(addr);
+    return extcode(raw_code).size();
 }
 
 bytes32 Host::get_code_hash(const address& addr) const noexcept
 {
-    // TODO: Cache code hash. It will be needed also to compute the MPT hash.
     const auto* const acc = m_state.find(addr);
-    return (acc != nullptr && !acc->is_empty()) ? keccak256(extcode(acc->code)) : bytes32{};
+    if (acc == nullptr || acc->is_empty())
+        return {};
+
+    // Load code and check if not EOF.
+    // TODO: Optimize the second account lookup here.
+    if (is_eof_container(m_state.get_code(addr)))
+        return EOF_CODE_HASH_SENTINEL;
+
+    return acc->code_hash;
 }
 
 size_t Host::copy_code(const address& addr, size_t code_offset, uint8_t* buffer_data,
     size_t buffer_size) const noexcept
 {
-    const auto* const acc = m_state.find(addr);
-    const auto code = (acc != nullptr) ? extcode(acc->code) : bytes_view{};
+    const auto raw_code = m_state.get_code(addr);
+    const auto code = extcode(raw_code);
     const auto code_slice = code.substr(std::min(code_offset, code.size()));
     const auto num_bytes = std::min(buffer_size, code_slice.size());
     std::copy_n(code_slice.begin(), num_bytes, buffer_data);
@@ -170,11 +178,36 @@ bool Host::selfdestruct(const address& addr, const address& beneficiary) noexcep
 
 address compute_create_address(const address& sender, uint64_t sender_nonce) noexcept
 {
-    // TODO: Compute CREATE address without using RLP library.
-    const auto rlp_list = rlp::encode_tuple(sender, sender_nonce);
-    const auto base_hash = keccak256(rlp_list);
+    static constexpr auto RLP_STR_BASE = 0x80;
+    static constexpr auto RLP_LIST_BASE = 0xc0;
+    static constexpr auto ADDRESS_SIZE = sizeof(sender);
+    static constexpr std::ptrdiff_t MAX_NONCE_SIZE = sizeof(sender_nonce);
+
+    uint8_t buffer[ADDRESS_SIZE + MAX_NONCE_SIZE + 3];  // 3 for RLP prefix bytes.
+    auto p = &buffer[1];                                // Skip RLP list prefix for now.
+    *p++ = RLP_STR_BASE + ADDRESS_SIZE;                 // Set RLP string prefix for address.
+    p = std::copy_n(sender.bytes, ADDRESS_SIZE, p);
+
+    if (sender_nonce < RLP_STR_BASE)  // Short integer encoding including 0 as empty string (0x80).
+    {
+        *p++ = sender_nonce != 0 ? static_cast<uint8_t>(sender_nonce) : RLP_STR_BASE;
+    }
+    else  // Prefixed integer encoding.
+    {
+        // TODO: bit_width returns int after [LWG 3656](https://cplusplus.github.io/LWG/issue3656).
+        // NOLINTNEXTLINE(readability-redundant-casting)
+        const auto num_nonzero_bytes = static_cast<int>((std::bit_width(sender_nonce) + 7) / 8);
+        *p++ = static_cast<uint8_t>(RLP_STR_BASE + num_nonzero_bytes);
+        intx::be::unsafe::store(p, sender_nonce);
+        p = std::shift_left(p, p + MAX_NONCE_SIZE, MAX_NONCE_SIZE - num_nonzero_bytes);
+    }
+
+    const auto total_size = static_cast<size_t>(p - buffer);
+    buffer[0] = static_cast<uint8_t>(RLP_LIST_BASE + (total_size - 1));  // Set the RLP list prefix.
+
+    const auto base_hash = keccak256({buffer, total_size});
     address addr;
-    std::copy_n(&base_hash.bytes[sizeof(base_hash) - sizeof(addr)], sizeof(addr), addr.bytes);
+    std::copy_n(&base_hash.bytes[sizeof(base_hash) - ADDRESS_SIZE], ADDRESS_SIZE, addr.bytes);
     return addr;
 }
 
@@ -201,23 +234,27 @@ std::optional<evmc_message> Host::prepare_message(evmc_message msg) noexcept
         msg.kind == EVMC_EOFCREATE)
     {
         auto& sender_acc = m_state.get(msg.sender);
-        const auto sender_nonce = sender_acc.nonce;
 
         // EIP-2681 (already checked for depth 0 during transaction validation).
-        if (sender_nonce == Account::NonceMax)
+        if (sender_acc.nonce == Account::NonceMax)
             return {};  // Light early exception.
 
         if (msg.depth != 0)
+        {
             m_state.journal_bump_nonce(msg.sender);
-        ++sender_acc.nonce;  // Bump sender nonce.
+            ++sender_acc.nonce;  // Bump sender nonce.
+        }
 
         if (msg.kind == EVMC_CREATE || msg.kind == EVMC_CREATE2 || msg.kind == EVMC_EOFCREATE)
         {
             // Compute and set the address of the account being created.
             assert(msg.recipient == address{});
             assert(msg.code_address == address{});
+            // Nonce was already incremented, but creation calculation needs non-incremented value
+            assert(sender_acc.nonce != 0);
+            const auto creation_sender_nonce = sender_acc.nonce - 1;
             if (msg.kind == EVMC_CREATE)
-                msg.recipient = compute_create_address(msg.sender, sender_nonce);
+                msg.recipient = compute_create_address(msg.sender, creation_sender_nonce);
             else if (msg.kind == EVMC_CREATE2)
             {
                 msg.recipient = compute_create2_address(
@@ -256,9 +293,9 @@ std::optional<evmc_message> Host::prepare_message(evmc_message msg) noexcept
                         EOFValidationError::success)
                         return {};  // Light early exception.
 
-                    msg.recipient = compute_create_address(msg.sender, sender_nonce);
+                    msg.recipient = compute_create_address(msg.sender, creation_sender_nonce);
                 }
-                // EOFCREATE or TXCREATE
+                // EOFCREATE
                 else
                 {
                     const bytes_view initcontainer{msg.code, msg.code_size};
@@ -341,25 +378,30 @@ evmc::Result Host::create(const evmc_message& msg) noexcept
                    evmc::Result{EVMC_FAILURE};
     }
 
-    if (!code.empty() && code[0] == 0xEF)
+    if (!code.empty())
     {
-        if (m_rev >= EVMC_PRAGUE)
+        if (code[0] == 0xEF)
         {
-            // Only EOFCREATE/TXCREATE/EOF-creation-tx is allowed to deploy code starting with EF.
-            // It must be valid EOF, which was validated before execution.
-            if (msg.kind != EVMC_EOFCREATE)
+            if (m_rev >= EVMC_OSAKA)
+            {
+                // Only EOFCREATE/EOF-creation-tx is allowed to deploy code starting with EF.
+                // It must be valid EOF, which was validated before execution.
+                if (msg.kind != EVMC_EOFCREATE)
+                    return evmc::Result{EVMC_CONTRACT_VALIDATION_FAILURE};
+                assert(validate_eof(m_rev, ContainerKind::runtime, code) ==
+                       EOFValidationError::success);
+            }
+            else if (m_rev >= EVMC_LONDON)
+            {
+                // EIP-3541: Reject EF code.
                 return evmc::Result{EVMC_CONTRACT_VALIDATION_FAILURE};
-            assert(
-                validate_eof(m_rev, ContainerKind::runtime, code) == EOFValidationError::success);
+            }
         }
-        else if (m_rev >= EVMC_LONDON)
-        {
-            // EIP-3541: Reject EF code.
-            return evmc::Result{EVMC_CONTRACT_VALIDATION_FAILURE};
-        }
-    }
 
-    new_acc->code = code;
+        new_acc->code_hash = keccak256(code);
+        new_acc->code = code;
+        new_acc->code_changed = true;
+    }
 
     return evmc::Result{result.status_code, gas_left, result.gas_refund, msg.recipient};
 }
@@ -376,26 +418,37 @@ evmc::Result Host::execute_message(const evmc_message& msg) noexcept
             m_state.journal_create(msg.recipient, exists);
     }
 
-    assert(msg.kind != EVMC_CALL || evmc::address{msg.recipient} == msg.code_address);
-    auto* const dst_acc =
-        (msg.kind == EVMC_CALL) ? &m_state.touch(msg.recipient) : m_state.find(msg.code_address);
-
-    if (msg.kind == EVMC_CALL && !evmc::is_zero(msg.value))
+    if (msg.kind == EVMC_CALL)
     {
-        // Transfer value: sender → recipient.
-        // The sender's balance is already checked therefore the sender account must exist.
-        const auto value = intx::be::load<intx::uint256>(msg.value);
-        assert(m_state.get(msg.sender).balance >= value);
-        m_state.journal_balance_change(msg.sender, m_state.get(msg.sender).balance);
-        m_state.journal_balance_change(msg.recipient, dst_acc->balance);
-        m_state.get(msg.sender).balance -= value;
-        dst_acc->balance += value;
+        if (evmc::is_zero(msg.value))
+            m_state.touch(msg.recipient);
+        else
+        {
+            // We skip touching if we send value, because account cannot end up empty.
+            // It will either have value, or code that transfers this value out, or will be
+            // selfdestructed anyway.
+            auto& dst_acc = m_state.get_or_insert(msg.recipient);
+
+            // Transfer value: sender → recipient.
+            // The sender's balance is already checked therefore the sender account must exist.
+            const auto value = intx::be::load<intx::uint256>(msg.value);
+            assert(m_state.get(msg.sender).balance >= value);
+            m_state.journal_balance_change(msg.sender, m_state.get(msg.sender).balance);
+            m_state.journal_balance_change(msg.recipient, dst_acc.balance);
+            m_state.get(msg.sender).balance -= value;
+            dst_acc.balance += value;
+        }
     }
 
-    if (is_precompile(m_rev, msg.code_address))
+    // Calls to precompile address via EIP-7702 delegation execute empty code instead of precompile.
+    if ((msg.flags & EVMC_DELEGATED) == 0 && is_precompile(m_rev, msg.code_address))
         return call_precompile(m_rev, msg);
 
-    const auto code = dst_acc != nullptr ? bytes_view{dst_acc->code} : bytes_view{};
+    // TODO: get_code() performs the account lookup. Add a way to get an account with code?
+    const auto code = m_state.get_code(msg.code_address);
+    if (code.empty())
+        return evmc::Result{EVMC_SUCCESS, msg.gas};  // Skip trivial execution.
+
     return m_vm.execute(*this, m_rev, msg, code.data(), code.size());
 }
 
@@ -446,24 +499,15 @@ evmc_tx_context Host::get_tx_context() const noexcept
         m_block.prev_randao,
         0x01_bytes32,  // Chain ID is expected to be 1.
         uint256be{m_block.base_fee},
-        intx::be::store<uint256be>(m_block.blob_base_fee),
+        intx::be::store<uint256be>(m_block.blob_base_fee.value_or(0)),
         m_tx.blob_hashes.data(),
         m_tx.blob_hashes.size(),
-        m_tx_initcodes.data(),
-        m_tx_initcodes.size(),
     };
 }
 
 bytes32 Host::get_block_hash(int64_t block_number) const noexcept
 {
-    if (const auto& it = m_block.known_block_hashes.find(block_number);
-        it != m_block.known_block_hashes.end())
-        return it->second;
-
-    // Convention for testing: if the block hash in unknown return the predefined "fake" value.
-    // https://github.com/ethereum/go-ethereum/blob/v1.12.2/tests/state_test_util.go#L432
-    const auto s = std::to_string(block_number);
-    return keccak256({reinterpret_cast<const uint8_t*>(s.data()), s.size()});
+    return m_block_hashes.get_block_hash(block_number);
 }
 
 void Host::emit_log(const address& addr, const uint8_t* data, size_t data_size,
@@ -489,7 +533,7 @@ evmc_access_status Host::access_account(const address& addr) noexcept
 
 evmc_access_status Host::access_storage(const address& addr, const bytes32& key) noexcept
 {
-    auto& storage_slot = m_state.get(addr).storage[key];
+    auto& storage_slot = m_state.get_storage(addr, key);
     m_state.journal_storage_change(addr, key, storage_slot);
     return std::exchange(storage_slot.access_status, EVMC_ACCESS_WARM);
 }

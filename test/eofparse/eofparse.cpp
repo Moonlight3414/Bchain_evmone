@@ -10,7 +10,7 @@
 
 namespace
 {
-inline constexpr bool isalnum(char ch) noexcept
+constexpr bool isalnum(char ch) noexcept
 {
     return (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
 }
@@ -63,7 +63,7 @@ int main(int argc, char* argv[])
             }
 
             const auto& eof = *o;
-            const auto err = evmone::validate_eof(EVMC_PRAGUE, container_kind, eof);
+            const auto err = evmone::validate_eof(EVMC_OSAKA, container_kind, eof);
             if (err != evmone::EOFValidationError::success)
             {
                 std::cout << "err: " << evmone::get_error_message(err) << "\n";

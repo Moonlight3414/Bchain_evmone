@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "bloom_filter.hpp"
-#include "state.hpp"
+#include "transaction.hpp"
 
 namespace evmone::state
 {
@@ -58,7 +58,7 @@ BloomFilter bloom_filter_from_bytes(const bytes_view& data) noexcept
 {
     assert(data.size() == 256);
     BloomFilter res;
-    std::copy(std::begin(data), std::end(data), std::begin(res.bytes));
+    std::ranges::copy(data, res.bytes);
     return res;
 }
 

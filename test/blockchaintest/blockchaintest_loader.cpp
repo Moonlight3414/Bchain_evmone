@@ -18,6 +18,13 @@ T load_if_exists(const json::json& j, std::string_view key)
         return from_json<T>(*it);
     return {};
 }
+template <typename T>
+std::optional<T> load_optional(const json::json& j, std::string_view key)
+{
+    if (const auto it = j.find(key); it != j.end())
+        return from_json<T>(*it);
+    return std::nullopt;
+}
 }  // namespace
 
 template <>
@@ -41,11 +48,13 @@ BlockHeader from_json<BlockHeader>(const json::json& j)
         .transactions_root = from_json<hash256>(j.at("transactionsTrie")),
         .withdrawal_root = load_if_exists<hash256>(j, "withdrawalsRoot"),
         .parent_beacon_block_root = load_if_exists<hash256>(j, "parentBeaconBlockRoot"),
-        .excess_blob_gas = load_if_exists<uint64_t>(j, "excessBlobGas"),
+        .blob_gas_used = load_optional<uint64_t>(j, "blobGasUsed"),
+        .excess_blob_gas = load_optional<uint64_t>(j, "excessBlobGas"),
+        .requests_hash = load_if_exists<hash256>(j, "requestsHash"),
     };
 }
 
-static TestBlock load_test_block(const json::json& j, evmc_revision rev)
+static TestBlock load_test_block(const json::json& j, const RevisionSchedule& rev_schedule)
 {
     using namespace state;
     TestBlock tb;
@@ -55,14 +64,22 @@ static TestBlock load_test_block(const json::json& j, evmc_revision rev)
         tb.expected_block_header = from_json<BlockHeader>(*it);
         tb.block_info.number = tb.expected_block_header.block_number;
         tb.block_info.timestamp = tb.expected_block_header.timestamp;
+
+        const auto rev = rev_schedule.get_revision(tb.block_info.timestamp);
+
         tb.block_info.gas_limit = tb.expected_block_header.gas_limit;
         tb.block_info.coinbase = tb.expected_block_header.coinbase;
         tb.block_info.difficulty = tb.expected_block_header.difficulty;
         tb.block_info.prev_randao = tb.expected_block_header.prev_randao;
         tb.block_info.base_fee = tb.expected_block_header.base_fee_per_gas;
         tb.block_info.parent_beacon_block_root = tb.expected_block_header.parent_beacon_block_root;
+        tb.block_info.blob_gas_used = tb.expected_block_header.blob_gas_used;
+        tb.block_info.excess_blob_gas = tb.expected_block_header.excess_blob_gas;
+
         tb.block_info.blob_base_fee =
-            compute_blob_gas_price(tb.expected_block_header.excess_blob_gas);
+            tb.block_info.excess_blob_gas.has_value() ?
+                std::optional(state::compute_blob_gas_price(rev, *tb.block_info.excess_blob_gas)) :
+                std::nullopt;
 
         // Override prev_randao with difficulty pre-Merge
         if (rev < EVMC_PARIS)
@@ -70,18 +87,6 @@ static TestBlock load_test_block(const json::json& j, evmc_revision rev)
             tb.block_info.prev_randao =
                 intx::be::store<bytes32>(intx::uint256{tb.block_info.difficulty});
         }
-    }
-
-    if (const auto it = j.find("expectException"); it != j.end())
-    {
-        // TODO: Add support for invalid blocks.
-        throw UnsupportedTestFeature("tests with invalid blocks are not supported");
-    }
-
-    if (const auto it = j.find("transactionSequence"); it != j.end())
-    {
-        // TODO: Add support for invalid blocks.
-        throw UnsupportedTestFeature("tests with invalid transactions are not supported");
     }
 
     if (const auto it = j.find("uncleHeaders"); it != j.end())
@@ -123,7 +128,25 @@ BlockchainTest load_blockchain_test_case(const std::string& name, const json::js
     bt.rev = to_rev_schedule(j.at("network").get<std::string>());
 
     for (const auto& el : j.at("blocks"))
-        bt.test_blocks.emplace_back(load_test_block(el, bt.rev.get_revision(0)));
+    {
+        if (const auto it = el.find("expectException"); it != el.end())
+        {
+            // `rlp_decoded` holds the `FixtureBlock` element with the relevant block data for
+            // invalid blocks within a test. It should be a sibling element to `expectException`.
+
+            // TODO: Add support for invalidly rlp-encoded blocks, which do
+            // not have `rlp_decoded`.
+            if (!el.contains("rlp_decoded"))
+                throw UnsupportedTestFeature(
+                    "tests with invalidly rlp-encoded blocks are not supported");
+
+            auto test_block = load_test_block(el.at("rlp_decoded"), bt.rev);
+            test_block.valid = false;
+            bt.test_blocks.emplace_back(test_block);
+        }
+        else
+            bt.test_blocks.emplace_back(load_test_block(el, bt.rev));
+    }
 
     bt.expectation.last_block_hash = from_json<hash256>(j.at("lastblockhash"));
 
